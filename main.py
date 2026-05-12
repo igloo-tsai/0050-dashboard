@@ -16,6 +16,27 @@ PEER_TICKERS = {
     "006208 富邦台50": "006208.TW",
     "加權股價指數": "^TWII",
 }
+TAIWAN_STOCK_ALIASES = {
+    "台積電": "2330.TW",
+    "光寶科": "2301.TW",
+    "欣興": "3037.TW",
+    "鴻海": "2317.TW",
+    "聯發科": "2454.TW",
+    "廣達": "2382.TW",
+    "緯創": "3231.TW",
+    "元大台灣50": "0050.TW",
+    "0050": "0050.TW",
+}
+BACKGROUND_TICKERS = {
+    "QQQ": "QQQ",
+    "SOXX": "SOXX",
+    "SPY": "SPY",
+    "VTI": "VTI",
+    "006208.TW": "006208.TW",
+    "0050.TW": "0050.TW",
+    "^TWII": "^TWII",
+    "^VIX": "^VIX",
+}
 
 
 @dataclass(frozen=True)
@@ -64,6 +85,34 @@ class IntradayReference:
     difference_from_close_pct: float
     add_on_zones: dict[str, bool]
     action_suggestion: str
+
+
+@dataclass(frozen=True)
+class TaiwanStockAnalysis:
+    label: str
+    ticker: str
+    latest_price: float
+    ytd_return_pct: float
+    one_year_return_pct: float
+    annual_volatility_pct: float
+    max_drawdown_pct: float
+    rsi_value: float | None
+    ma20: float | None
+    ma60: float | None
+    ma120: float | None
+    drawdown_from_high_pct: float
+    distance_ma20_pct: float | None
+    distance_ma60_pct: float | None
+    distance_ma120_pct: float | None
+    ai_score: int
+    recommendation: str
+    risk_level: str
+    market_temperature: str
+    stock_ratio: int
+    cash_ratio: int
+    reason_summary: str
+    background_summary: dict[str, str]
+    missing_background: bool
 
 
 def require_optional_packages() -> tuple[object | None, object | None]:
@@ -316,6 +365,288 @@ def build_intraday_reference(price_0050: pd.Series, manual_price: float) -> Intr
         difference_from_close_pct=difference_from_close_pct,
         add_on_zones=zones,
         action_suggestion=action_suggestion,
+    )
+
+
+def resolve_taiwan_stock_query(query: str) -> tuple[str, str | None]:
+    text = query.strip()
+    if not text:
+        return "", None
+
+    if text in TAIWAN_STOCK_ALIASES:
+        return text, TAIWAN_STOCK_ALIASES[text]
+
+    normalized = text.upper().replace(".TW", "").replace(".TWO", "")
+    if normalized.isdigit() and len(normalized) == 4:
+        return normalized, f"{normalized}.TW"
+
+    return text, None
+
+
+def ticker_display_name(ticker: str, fallback: str) -> str:
+    for name, mapped_ticker in TAIWAN_STOCK_ALIASES.items():
+        if mapped_ticker == ticker and not name.isdigit():
+            return f"{name}（{ticker}）"
+    return f"{fallback}（{ticker}）"
+
+
+def load_taiwan_stock_series(query: str, start: date, end: date) -> tuple[str, str, pd.Series]:
+    label, ticker = resolve_taiwan_stock_query(query)
+    if ticker is None:
+        return label, "", pd.Series(dtype="float64")
+
+    prices = load_prices([ticker], start, end)
+    if ticker in prices and not prices[ticker].dropna().empty:
+        return ticker_display_name(ticker, label), ticker, prices[ticker].dropna()
+
+    if ticker.endswith(".TW"):
+        fallback_ticker = ticker.replace(".TW", ".TWO")
+        fallback_prices = load_prices([fallback_ticker], start, end)
+        if fallback_ticker in fallback_prices and not fallback_prices[fallback_ticker].dropna().empty:
+            return ticker_display_name(fallback_ticker, label), fallback_ticker, fallback_prices[fallback_ticker].dropna()
+
+    return ticker_display_name(ticker, label), ticker, pd.Series(dtype="float64")
+
+
+def safe_latest(series: pd.Series) -> float | None:
+    clean = series.dropna()
+    if clean.empty:
+        return None
+    return float(clean.iloc[-1])
+
+
+def distance_pct(reference: float | None, value: float) -> float | None:
+    if reference is None or pd.isna(reference) or reference == 0:
+        return None
+    return pct_change(float(reference), value)
+
+
+def classify_trend(series: pd.Series) -> str | None:
+    clean = series.dropna()
+    if clean.empty:
+        return None
+
+    last = float(clean.iloc[-1])
+    ma20 = safe_latest(moving_average(clean, 20))
+    ma60 = safe_latest(moving_average(clean, 60))
+    latest_rsi = safe_latest(rsi(clean))
+    if latest_rsi is not None and latest_rsi > 72 and ma20 is not None and last > ma20:
+        return "過熱"
+    if ma20 is not None and ma60 is not None and last > ma20 and last > ma60:
+        return "偏多"
+    if ma60 is not None and last < ma60:
+        return "偏弱"
+    return "中性"
+
+
+def build_background_market_summary(start: date, end: date) -> tuple[dict[str, str], int, int, bool]:
+    prices = load_prices(list(BACKGROUND_TICKERS.values()), start, end)
+    missing = prices.empty
+
+    def get_series(ticker: str) -> pd.Series:
+        if ticker not in prices:
+            return pd.Series(dtype="float64")
+        return prices[ticker].dropna()
+
+    qqq_status = classify_trend(get_series("QQQ"))
+    soxx_status = classify_trend(get_series("SOXX"))
+    spy_status = classify_trend(get_series("SPY"))
+    vti_status = classify_trend(get_series("VTI"))
+    tw50_status = classify_trend(get_series("0050.TW"))
+    peer_status = classify_trend(get_series("006208.TW"))
+    vix_value = safe_latest(get_series("^VIX"))
+
+    if qqq_status is None:
+        missing = True
+        qqq_status = "中性"
+    if soxx_status is None:
+        missing = True
+        soxx_status = "中性"
+    if spy_status is None or vti_status is None:
+        missing = True
+        risk_status = "中性"
+    elif "過熱" in {spy_status, vti_status}:
+        risk_status = "偏高"
+    elif "偏弱" in {spy_status, vti_status}:
+        risk_status = "偏低"
+    else:
+        risk_status = "中性"
+
+    if tw50_status is None and peer_status is None:
+        missing = True
+        large_cap_status = "正常"
+    elif "過熱" in {tw50_status, peer_status}:
+        large_cap_status = "偏熱"
+    elif "偏弱" in {tw50_status, peer_status}:
+        large_cap_status = "偏弱"
+    else:
+        large_cap_status = "正常"
+
+    if vix_value is None:
+        missing = True
+        vix_status = "正常"
+    elif vix_value < 12:
+        vix_status = "過度樂觀"
+    elif vix_value >= 25:
+        vix_status = "恐慌升溫"
+    else:
+        vix_status = "正常"
+
+    penalty = 0
+    bonus = 0
+    if qqq_status == "過熱" or soxx_status == "過熱" or large_cap_status == "偏熱" or vix_status == "過度樂觀":
+        penalty += 8
+    if vix_status == "恐慌升溫" or risk_status == "偏低":
+        bonus += 5
+
+    return (
+        {
+            "美股科技趨勢": qqq_status,
+            "半導體風向": soxx_status,
+            "大盤風險偏好": risk_status,
+            "台股大型股比較": large_cap_status,
+            "VIX風險訊號": vix_status,
+        },
+        penalty,
+        bonus,
+        missing,
+    )
+
+
+def analyze_taiwan_stock(
+    label: str,
+    ticker: str,
+    prices: pd.Series,
+    background_summary: dict[str, str],
+    background_penalty: int,
+    background_bonus: int,
+    missing_background: bool,
+) -> TaiwanStockAnalysis | None:
+    clean = prices.dropna()
+    if clean.empty:
+        return None
+
+    latest_price = float(clean.iloc[-1])
+    current_year = clean[clean.index.year == clean.index[-1].year]
+    one_year = clean[clean.index >= clean.index[-1] - pd.DateOffset(years=1)]
+    ma20 = safe_latest(moving_average(clean, 20))
+    ma60 = safe_latest(moving_average(clean, 60))
+    ma120 = safe_latest(moving_average(clean, 120))
+    latest_rsi = safe_latest(rsi(clean))
+    recent_high = float(clean.tail(120).max())
+    drawdown_from_high_pct = pct_change(recent_high, latest_price)
+    max_drawdown_pct = max_drawdown(clean)
+    annual_volatility_pct = annualized_volatility(clean.tail(252))
+    ytd_return_pct = pct_change(float(current_year.iloc[0]), latest_price) if not current_year.empty else 0.0
+    one_year_return_pct = pct_change(float(one_year.iloc[0]), latest_price) if not one_year.empty else 0.0
+
+    score = 50
+    reasons = []
+    if ma20 is not None and latest_price > ma20:
+        score += 5
+        reasons.append("價格站上 MA20，短線趨勢偏多。")
+    if ma60 is not None and latest_price > ma60:
+        score += 7
+        reasons.append("價格站上 MA60，中期趨勢獲得支撐。")
+    if ma120 is not None and latest_price > ma120:
+        score += 8
+        reasons.append("價格位於 MA120 之上，長線結構仍偏正向。")
+    if ma20 is not None and ma60 is not None and ma20 > ma60:
+        score += 5
+        reasons.append("MA20 高於 MA60，均線排列有利。")
+
+    if drawdown_from_high_pct <= -20:
+        score += 16
+        reasons.append("近期高點回撤超過 20%，評價修正幅度較深。")
+    elif drawdown_from_high_pct <= -10:
+        score += 10
+        reasons.append("近期高點回撤超過 10%，出現分批觀察機會。")
+    if latest_rsi is not None and latest_rsi < 40:
+        score += 8
+        reasons.append("RSI 低於 40，短線追殺壓力可能降溫。")
+    if ma120 is not None and abs(distance_pct(ma120, latest_price) or 999) <= 3:
+        score += 6
+        reasons.append("股價接近 MA120 支撐區。")
+    if background_bonus:
+        score += background_bonus
+        reasons.append("背景市場恐慌升溫，逆勢布局分數小幅加分。")
+
+    overheating_penalty = 0
+    if latest_rsi is not None and latest_rsi > 70:
+        overheating_penalty += 10
+        reasons.append("RSI 高於 70，過熱風險扣分。")
+    if drawdown_from_high_pct > -3:
+        overheating_penalty += 10
+        reasons.append("股價接近近期高點，避免在高檔過度追價。")
+    if drawdown_from_high_pct > -3 and ma20 is not None and ma60 is not None and latest_price > ma20 and latest_price > ma60:
+        overheating_penalty += 6
+        reasons.append("趨勢強但幾乎沒有回撤，降低積極加碼訊號。")
+    if background_penalty:
+        overheating_penalty += background_penalty
+        reasons.append("背景市場偏熱或過度樂觀，模型提高保守係數。")
+
+    score = int(clamp(score - overheating_penalty, 0, 100))
+    if score >= 75:
+        recommendation = "建議加碼"
+        risk_level = "低風險"
+        stock_ratio = 75
+    elif score >= 55:
+        recommendation = "持有觀察"
+        risk_level = "中等風險"
+        stock_ratio = 55
+    else:
+        recommendation = "暫緩進場"
+        risk_level = "高風險"
+        stock_ratio = 35
+
+    if latest_rsi is not None and latest_rsi > 75:
+        stock_ratio = min(stock_ratio, 45)
+    if background_penalty >= 8:
+        stock_ratio = min(stock_ratio, 50)
+
+    if score >= 75 and drawdown_from_high_pct <= -10:
+        market_temperature = "冷卻"
+    elif latest_rsi is not None and latest_rsi > 75 and drawdown_from_high_pct > -5:
+        market_temperature = "狂熱"
+    elif latest_rsi is not None and latest_rsi > 68:
+        market_temperature = "偏熱"
+    else:
+        market_temperature = "中性"
+
+    cash_ratio = 100 - stock_ratio
+    stock_rsi_text = "無資料" if latest_rsi is None else f"{latest_rsi:.1f}"
+    reason_summary = (
+        f"{label} AI評分為 {score}/100，建議為「{recommendation}」。"
+        f"目前 RSI 為 {stock_rsi_text}，"
+        f"距近期高點回撤 {drawdown_from_high_pct:.2f}%。"
+        f"{''.join(reasons[:4])}"
+    )
+
+    return TaiwanStockAnalysis(
+        label=label,
+        ticker=ticker,
+        latest_price=latest_price,
+        ytd_return_pct=ytd_return_pct,
+        one_year_return_pct=one_year_return_pct,
+        annual_volatility_pct=annual_volatility_pct,
+        max_drawdown_pct=max_drawdown_pct,
+        rsi_value=latest_rsi,
+        ma20=ma20,
+        ma60=ma60,
+        ma120=ma120,
+        drawdown_from_high_pct=drawdown_from_high_pct,
+        distance_ma20_pct=distance_pct(ma20, latest_price),
+        distance_ma60_pct=distance_pct(ma60, latest_price),
+        distance_ma120_pct=distance_pct(ma120, latest_price),
+        ai_score=score,
+        recommendation=recommendation,
+        risk_level=risk_level,
+        market_temperature=market_temperature,
+        stock_ratio=stock_ratio,
+        cash_ratio=cash_ratio,
+        reason_summary=reason_summary,
+        background_summary=background_summary,
+        missing_background=missing_background,
     )
 
 
@@ -797,6 +1128,104 @@ def render_comparison_chart(go: object, prices: pd.DataFrame) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
+def render_taiwan_stock_chart(go: object, prices: pd.Series, analysis: TaiwanStockAnalysis) -> None:
+    clean = prices.dropna()
+    if clean.empty:
+        st.warning("此股票目前沒有足夠資料可繪製價格趨勢圖。")
+        return
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=clean.index,
+            y=clean,
+            mode="lines",
+            name="收盤價",
+            line={"width": 2.5, "color": "#2563eb"},
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=clean.index,
+            y=moving_average(clean, 20),
+            mode="lines",
+            name="MA20",
+            line={"width": 1.5, "color": "#f59e0b"},
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=clean.index,
+            y=moving_average(clean, 60),
+            mode="lines",
+            name="MA60",
+            line={"width": 1.5, "color": "#10b981"},
+        )
+    )
+    fig.update_layout(
+        height=360,
+        margin={"l": 20, "r": 20, "t": 20, "b": 20},
+        hovermode="x unified",
+        yaxis_title="還原權值收盤價",
+        template="plotly_white",
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"responsive": True})
+
+
+def render_taiwan_stock_analysis(go: object, analysis: TaiwanStockAnalysis, prices: pd.Series) -> None:
+    st.markdown(f"### {analysis.label}")
+    top_cols = st.columns(4)
+    with top_cols[0]:
+        render_metric("最新價格", format_price(analysis.latest_price))
+    with top_cols[1]:
+        render_metric("AI評分", f"{analysis.ai_score}/100")
+    with top_cols[2]:
+        render_metric("建議", analysis.recommendation)
+    with top_cols[3]:
+        render_metric("風險等級", analysis.risk_level)
+
+    allocation_cols = st.columns(4)
+    with allocation_cols[0]:
+        render_metric("市場溫度", analysis.market_temperature)
+    with allocation_cols[1]:
+        render_metric("建議股票比例", f"{analysis.stock_ratio}%")
+    with allocation_cols[2]:
+        render_metric("建議現金比例", f"{analysis.cash_ratio}%")
+    with allocation_cols[3]:
+        render_metric("近期高點回撤", format_pct(analysis.drawdown_from_high_pct))
+
+    indicator_cols = st.columns(4)
+    with indicator_cols[0]:
+        render_metric("RSI", "無資料" if analysis.rsi_value is None else f"{analysis.rsi_value:.1f}")
+    with indicator_cols[1]:
+        render_metric("MA20", "無資料" if analysis.ma20 is None else format_price(analysis.ma20))
+    with indicator_cols[2]:
+        render_metric("MA60", "無資料" if analysis.ma60 is None else format_price(analysis.ma60))
+    with indicator_cols[3]:
+        render_metric("MA120", "無資料" if analysis.ma120 is None else format_price(analysis.ma120))
+
+    distance_cols = st.columns(3)
+    with distance_cols[0]:
+        render_metric("距 MA20", "無資料" if analysis.distance_ma20_pct is None else format_pct(analysis.distance_ma20_pct))
+    with distance_cols[1]:
+        render_metric("距 MA60", "無資料" if analysis.distance_ma60_pct is None else format_pct(analysis.distance_ma60_pct))
+    with distance_cols[2]:
+        render_metric("距 MA120", "無資料" if analysis.distance_ma120_pct is None else format_pct(analysis.distance_ma120_pct))
+
+    st.info(analysis.reason_summary)
+    if analysis.missing_background:
+        st.caption("部分背景市場資料暫時無法取得，已略過該因子。")
+
+    st.subheader("背景市場摘要")
+    background_cols = st.columns(5)
+    for col, (label, value) in zip(background_cols, analysis.background_summary.items()):
+        with col:
+            render_metric(label, value)
+
+    st.subheader("價格趨勢")
+    render_taiwan_stock_chart(go, prices, analysis)
+
+
 def simulate_investment(
     prices: pd.Series,
     initial_investment: float,
@@ -954,8 +1383,8 @@ def main() -> None:
 
     st.caption(f"最後更新時間：{updated_at}｜最新收盤日：{latest_close_date}｜目前模式：{data_mode}")
 
-    tab_ai, tab_trend, tab_simulator, tab_data = st.tabs(
-        ["智慧決策", "趨勢", "模擬", "資料"]
+    tab_ai, tab_stock_ai, tab_trend, tab_simulator, tab_data = st.tabs(
+        ["智慧決策", "台股AI分析", "趨勢", "模擬", "資料"]
     )
 
     with tab_ai:
@@ -1028,6 +1457,42 @@ def main() -> None:
             st.subheader("回撤分析")
             render_metric("目前回撤", f"{decision.drawdown_pct:.2f}%")
             st.write(decision.drawdown_analysis)
+
+    with tab_stock_ai:
+        st.subheader("台股AI分析")
+        st.caption("請輸入台股代碼或常見公司名稱；背景市場僅作為風險參考，不作為分析標的。")
+        stock_query = st.text_input(
+            "台股代碼或公司名稱",
+            value="2330",
+            placeholder="例如：2330、台積電、2301、光寶科、3037、欣興",
+        )
+
+        st.caption("範例：2330 / 台積電、2301 / 光寶科、3037 / 欣興、2317 / 鴻海、2454 / 聯發科、2382 / 廣達、3231 / 緯創")
+
+        query_label, resolved_ticker = resolve_taiwan_stock_query(stock_query)
+        if resolved_ticker is None:
+            st.warning("請輸入台股代碼，例如 2330，或常見公司名稱，例如 台積電。")
+        else:
+            with st.spinner("正在分析台股與背景市場資料..."):
+                stock_label, stock_ticker, stock_prices = load_taiwan_stock_series(stock_query, start, end)
+
+                if stock_prices.dropna().empty:
+                    st.warning("目前無法取得此台股的有效歷史資料，請確認代碼或稍後再試。")
+                else:
+                    background_summary, background_penalty, background_bonus, missing_background = build_background_market_summary(start, end)
+                    stock_analysis = analyze_taiwan_stock(
+                        stock_label,
+                        stock_ticker,
+                        stock_prices,
+                        background_summary,
+                        background_penalty,
+                        background_bonus,
+                        missing_background,
+                    )
+                    if stock_analysis is None:
+                        st.warning("此台股資料不足，暫時無法產生 AI 分析。")
+                    else:
+                        render_taiwan_stock_analysis(go, stock_analysis, stock_prices)
 
     with tab_trend:
         st.subheader("價格趨勢")
