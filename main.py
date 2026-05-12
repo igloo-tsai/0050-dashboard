@@ -954,8 +954,8 @@ def main() -> None:
 
     st.caption(f"最後更新時間：{updated_at}｜最新收盤日：{latest_close_date}｜目前模式：{data_mode}")
 
-    tab_ai, tab_trend, tab_compare, tab_simulator, tab_data = st.tabs(
-        ["智慧決策", "趨勢", "比較", "模擬", "資料"]
+    tab_ai, tab_trend, tab_simulator, tab_data = st.tabs(
+        ["智慧決策", "趨勢", "模擬", "資料"]
     )
 
     with tab_ai:
@@ -1035,21 +1035,6 @@ def main() -> None:
 
         st.subheader("回撤")
         render_drawdown_chart(go, price_0050)
-
-    with tab_compare:
-        st.subheader("相對表現")
-        available_peers = [ticker for ticker in PEER_TICKERS.values() if ticker in prices]
-        render_comparison_chart(go, prices[available_peers].dropna(how="all"))
-
-        returns = prices[available_peers].pct_change().dropna(how="all")
-        if not returns.empty:
-            st.subheader("日報酬相關係數")
-            st.dataframe(
-                returns.corr().rename(index={v: k for k, v in PEER_TICKERS.items()}).rename(
-                    columns={v: k for k, v in PEER_TICKERS.items()}
-                ),
-                use_container_width=True,
-            )
 
     with tab_simulator:
         st.subheader("定期投入模擬")
