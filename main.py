@@ -5,41 +5,81 @@ import yfinance as yf
 
 st.set_page_config(page_title="0050 投資儀表板", layout="wide")
 
+
 # =========================
-# 基本安全函數
+# 工具函數
 # =========================
-def safe_download(ticker):
+def safe_download(ticker: str, period: str = "2y") -> pd.DataFrame | None:
     try:
-        df = yf.download(ticker, period="2y", progress=False)
+        df = yf.download(ticker, period=period, auto_adjust=True, progress=False)
         if df is None or df.empty:
             return None
-        return df.dropna()
-    except:
+        return df.dropna(how="all")
+    except Exception:
         return None
 
 
-def calculate_rsi(series, period=14):
-    delta = series.diff()
+def get_close_series(df: pd.DataFrame) -> pd.Series:
+    if df is None or df.empty:
+        return pd.Series(dtype="float64")
+
+    close = df["Close"]
+
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+
+    close = pd.to_numeric(close, errors="coerce").dropna()
+    return close
+
+
+def calculate_rsi(close: pd.Series, period: int = 14) -> pd.Series:
+    delta = close.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
+
     avg_gain = gain.rolling(period).mean()
     avg_loss = loss.rolling(period).mean()
 
-    rs = avg_gain / avg_loss
+    rs = avg_gain / avg_loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
-    return rsi
+    return rsi.dropna()
 
 
-def max_drawdown(series):
-    roll_max = series.cummax()
-    drawdown = (series - roll_max) / roll_max
-    return drawdown.min()
+def safe_latest(series: pd.Series, default: float = 0.0) -> float:
+    series = pd.to_numeric(series, errors="coerce").dropna()
+    if series.empty:
+        return default
+    return float(series.iloc[-1])
+
+
+def max_drawdown(close: pd.Series) -> float:
+    close = close.dropna()
+    if close.empty:
+        return 0.0
+
+    peak = close.cummax()
+    drawdown = close / peak - 1
+    return float(drawdown.min() * 100)
+
+
+def pct_change(first: float, last: float) -> float:
+    if first == 0 or pd.isna(first) or pd.isna(last):
+        return 0.0
+    return (last / first - 1) * 100
+
+
+def format_pct(value: float) -> str:
+    return f"{value:+.2f}%"
+
+
+def format_price(value: float) -> str:
+    return f"新台幣 {value:,.2f}"
 
 
 # =========================
-# 台股 mapping
+# 台股代碼對照
 # =========================
-alias_map = {
+ALIAS_MAP = {
     "台積電": "2330.TW",
     "光寶科": "2301.TW",
     "欣興": "3037.TW",
@@ -47,120 +87,237 @@ alias_map = {
     "聯發科": "2454.TW",
     "廣達": "2382.TW",
     "緯創": "3231.TW",
+    "元大台灣50": "0050.TW",
     "0050": "0050.TW",
-    "元大台灣50": "0050.TW"
 }
 
 
-def convert_to_ticker(user_input):
-    user_input = user_input.strip()
+def convert_to_ticker(user_input: str) -> str | None:
+    text = user_input.strip()
 
-    if user_input in alias_map:
-        return alias_map[user_input]
+    if text in ALIAS_MAP:
+        return ALIAS_MAP[text]
 
-    if user_input.isdigit() and len(user_input) == 4:
-        return f"{user_input}.TW"
+    if text.isdigit() and len(text) == 4:
+        return f"{text}.TW"
 
     return None
 
 
-# =========================
-# UI
-# =========================
-tab1, tab2 = st.tabs(["0050分析", "台股AI分析"])
+def analyze_stock(ticker: str) -> dict | None:
+    df = safe_download(ticker, period="2y")
+
+    if df is None or df.empty:
+        return None
+
+    close = get_close_series(df)
+
+    if close.empty or len(close) < 60:
+        return None
+
+    latest_price = safe_latest(close)
+
+    rsi_series = calculate_rsi(close)
+    rsi_value = safe_latest(rsi_series, default=50.0)
+
+    ma20 = safe_latest(close.rolling(20).mean(), default=latest_price)
+    ma60 = safe_latest(close.rolling(60).mean(), default=latest_price)
+    ma120 = safe_latest(close.rolling(120).mean(), default=latest_price)
+
+    recent_high = float(close.tail(120).max())
+    drawdown_from_high = pct_change(recent_high, latest_price)
+
+    one_year_close = close.tail(252)
+    one_year_return = (
+        pct_change(float(one_year_close.iloc[0]), latest_price)
+        if len(one_year_close) > 1
+        else 0.0
+    )
+
+    volatility = float(close.pct_change().dropna().std() * np.sqrt(252) * 100)
+    mdd = max_drawdown(close)
+
+    # =========================
+    # AI 評分
+    # =========================
+    score = 50
+    reasons = []
+
+    if latest_price > ma20:
+        score += 5
+        reasons.append("價格站上 MA20，短線趨勢偏多。")
+    else:
+        score -= 5
+        reasons.append("價格低於 MA20，短線動能偏弱。")
+
+    if latest_price > ma60:
+        score += 8
+        reasons.append("價格站上 MA60，中期趨勢仍有支撐。")
+    else:
+        score -= 8
+        reasons.append("價格低於 MA60，中期趨勢偏保守。")
+
+    if latest_price > ma120:
+        score += 7
+        reasons.append("價格站上 MA120，長線結構仍偏正向。")
+    else:
+        score -= 7
+        reasons.append("價格低於 MA120，長線結構需觀察。")
+
+    if rsi_value < 40:
+        score += 10
+        reasons.append("RSI 低於 40，短線有修正後反彈機會。")
+    elif rsi_value > 70:
+        score -= 12
+        reasons.append("RSI 高於 70，短線過熱，不宜追價。")
+    else:
+        reasons.append("RSI 位於中性區間。")
+
+    if drawdown_from_high <= -20:
+        score += 15
+        reasons.append("距近期高點回撤超過 20%，已進入深度修正區。")
+    elif drawdown_from_high <= -10:
+        score += 8
+        reasons.append("距近期高點回撤超過 10%，可分批觀察。")
+    elif drawdown_from_high > -3:
+        score -= 10
+        reasons.append("價格接近近期高點，追價風險偏高。")
+
+    score = max(0, min(100, int(score)))
+
+    if score >= 70:
+        recommendation = "建議加碼"
+        risk = "中等風險"
+        temperature = "冷卻"
+        stock_ratio = 70
+    elif score >= 45:
+        recommendation = "持有觀察"
+        risk = "中等風險"
+        temperature = "中性"
+        stock_ratio = 55
+    else:
+        recommendation = "暫緩進場"
+        risk = "高風險"
+        temperature = "偏熱"
+        stock_ratio = 35
+
+    if rsi_value > 75:
+        temperature = "狂熱"
+        recommendation = "暫緩進場"
+        risk = "高風險"
+        stock_ratio = min(stock_ratio, 35)
+
+    cash_ratio = 100 - stock_ratio
+
+    return {
+        "ticker": ticker,
+        "close": close,
+        "latest_price": latest_price,
+        "rsi": rsi_value,
+        "ma20": ma20,
+        "ma60": ma60,
+        "ma120": ma120,
+        "drawdown_from_high": drawdown_from_high,
+        "one_year_return": one_year_return,
+        "volatility": volatility,
+        "max_drawdown": mdd,
+        "score": score,
+        "recommendation": recommendation,
+        "risk": risk,
+        "temperature": temperature,
+        "stock_ratio": stock_ratio,
+        "cash_ratio": cash_ratio,
+        "reasons": reasons,
+    }
+
 
 # =========================
-# TAB1（保留簡單版）
+# App
 # =========================
-with tab1:
-    st.title("0050 投資儀表板")
-    st.write("原有功能保留（簡化顯示）")
+st.title("0050 投資儀表板")
+
+tab_0050, tab_stock = st.tabs(["0050分析", "台股AI分析"])
 
 
 # =========================
-# TAB2 台股AI分析
+# 0050 分析
 # =========================
-with tab2:
-    st.title("台股 AI 分析")
+with tab_0050:
+    st.header("0050 分析")
 
-    user_input = st.text_input("輸入台股代碼或名稱", placeholder="例如 2330 或 台積電")
+    result = analyze_stock("0050.TW")
 
-    if user_input:
-        ticker = convert_to_ticker(user_input)
+    if result is None:
+        st.error("目前無法取得 0050 資料，請稍後再試。")
+    else:
+        col1, col2, col3 = st.columns(3)
+        col1.metric("最新價格", format_price(result["latest_price"]))
+        col2.metric("AI評分", f"{result['score']}/100")
+        col3.metric("操作建議", result["recommendation"])
 
-        if ticker is None:
-            st.warning("請輸入台股代碼，例如 2330，或常見公司名稱，例如 台積電。")
+        col4, col5, col6 = st.columns(3)
+        col4.metric("RSI", f"{result['rsi']:.1f}")
+        col5.metric("市場溫度", result["temperature"])
+        col6.metric("風險等級", result["risk"])
+
+        st.subheader("AI 原因摘要")
+        for reason in result["reasons"]:
+            st.write(f"- {reason}")
+
+        st.subheader("0050 價格趨勢")
+        st.line_chart(result["close"])
+
+
+# =========================
+# 台股 AI 分析
+# =========================
+with tab_stock:
+    st.header("台股 AI 分析")
+
+    user_input = st.text_input(
+        "輸入台股代碼或名稱",
+        value="2330",
+        placeholder="例如：2330、台積電、2301、光寶科、3037、欣興",
+    )
+
+    ticker = convert_to_ticker(user_input)
+
+    if ticker is None:
+        st.warning("請輸入台股代碼，例如 2330，或常見公司名稱，例如 台積電。")
+    else:
+        result = analyze_stock(ticker)
+
+        if result is None:
+            st.error("目前無法取得有效資料，請確認代碼或稍後再試。")
         else:
-            df = safe_download(ticker)
+            st.subheader(f"{user_input}（{ticker}）")
 
-            if df is None:
-                st.error("無法取得資料，請稍後再試")
-            else:
-                close = df["Close"].dropna()
+            col1, col2, col3 = st.columns(3)
+            col1.metric("最新價格", format_price(result["latest_price"]))
+            col2.metric("AI評分", f"{result['score']}/100")
+            col3.metric("操作建議", result["recommendation"])
 
-                if len(close) < 50:
-                    st.warning("資料不足，無法分析")
-                else:
-                    latest_price = close.iloc[-1]
+            col4, col5, col6 = st.columns(3)
+            col4.metric("RSI", f"{result['rsi']:.1f}")
+            col5.metric("市場溫度", result["temperature"])
+            col6.metric("風險等級", result["risk"])
 
-                    ytd = (close.iloc[-1] / close.iloc[0] - 1) * 100
-                    one_year = (close.iloc[-1] / close.iloc[-252] - 1) * 100 if len(close) > 252 else 0
+            col7, col8 = st.columns(2)
+            col7.metric("建議股票比例", f"{result['stock_ratio']}%")
+            col8.metric("建議現金比例", f"{result['cash_ratio']}%")
 
-                    vol = close.pct_change().std() * np.sqrt(252) * 100
-                    mdd = max_drawdown(close) * 100
+            st.subheader("技術指標")
+            st.write(f"MA20：{result['ma20']:.2f}")
+            st.write(f"MA60：{result['ma60']:.2f}")
+            st.write(f"MA120：{result['ma120']:.2f}")
+            st.write(f"距近期高點回撤：{result['drawdown_from_high']:.2f}%")
+            st.write(f"近一年報酬：{result['one_year_return']:.2f}%")
+            st.write(f"年化波動率：{result['volatility']:.2f}%")
+            st.write(f"最大回撤：{result['max_drawdown']:.2f}%")
 
-                    rsi = calculate_rsi(close).iloc[-1]
+            st.subheader("AI 原因摘要")
+            for reason in result["reasons"]:
+                st.write(f"- {reason}")
 
-                    ma20 = close.rolling(20).mean().iloc[-1]
-                    ma60 = close.rolling(60).mean().iloc[-1]
-                    ma120 = close.rolling(120).mean().iloc[-1]
-
-                    drawdown = (latest_price - close.max()) / close.max() * 100
-
-                    # =========================
-                    # AI評分（簡化版）
-                    # =========================
-                    score = 50
-
-                    if rsi < 40:
-                        score += 10
-                    if rsi > 70:
-                        score -= 10
-                    if drawdown < -10:
-                        score += 10
-
-                    score = max(0, min(100, score))
-
-                    # =========================
-                    # 建議
-                    # =========================
-                    if score > 65:
-                        suggestion = "建議加碼"
-                        risk = "中等風險"
-                    elif score > 40:
-                        suggestion = "持有觀察"
-                        risk = "中等風險"
-                    else:
-                        suggestion = "暫緩進場"
-                        risk = "高風險"
-
-                    # =========================
-                    # 顯示
-                    # =========================
-                    st.subheader(f"{ticker}")
-
-                    col1, col2, col3 = st.columns(3)
-
-                    col1.metric("最新價格", f"{latest_price:.2f}")
-                    col2.metric("RSI", f"{rsi:.1f}")
-                    col3.metric("AI評分", f"{score}")
-
-                    st.write(f"MA20: {ma20:.2f}")
-                    st.write(f"MA60: {ma60:.2f}")
-                    st.write(f"MA120: {ma120:.2f}")
-                    st.write(f"最大回撤: {mdd:.2f}%")
-
-                    st.success(f"建議：{suggestion}")
-                    st.warning(f"風險等級：{risk}")
-
-                    st.line_chart(close)
+            st.subheader("價格趨勢")
+            st.line_chart(result["close"])
