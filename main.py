@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
+import plotly.graph_objects as go
 
 st.set_page_config(page_title="0050 投資儀表板", layout="wide")
 
@@ -76,6 +77,35 @@ def format_price(value: float) -> str:
     return f"新台幣 {value:,.2f}"
 
 
+def safe_price_chart(close: pd.Series, title: str = "價格趨勢"):
+    try:
+        chart_df = close.reset_index()
+        chart_df.columns = ["Date", "Close"]
+
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=chart_df["Date"],
+                y=chart_df["Close"],
+                mode="lines",
+                name="收盤價",
+            )
+        )
+
+        fig.update_layout(
+            title=title,
+            height=320,
+            margin=dict(l=10, r=10, t=40, b=10),
+            xaxis_title="日期",
+            yaxis_title="價格",
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+    except Exception:
+        st.warning("價格趨勢圖暫時無法顯示，但不影響其他分析功能。")
+
+
 # =========================
 # 台股代碼對照
 # =========================
@@ -137,9 +167,6 @@ def analyze_stock(ticker: str) -> dict | None:
     volatility = float(close.pct_change().dropna().std() * np.sqrt(252) * 100)
     mdd = max_drawdown(close)
 
-    # =========================
-    # AI 評分
-    # =========================
     score = 50
     reasons = []
 
@@ -250,8 +277,43 @@ with tab_0050:
     if result is None:
         st.error("目前無法取得 0050 資料，請稍後再試。")
     else:
+        st.subheader("盤中價格資訊")
+
+        intraday_price = st.number_input(
+            "請輸入目前盤中價格",
+            min_value=0.0,
+            value=float(result["latest_price"]),
+            step=0.05,
+            format="%.2f",
+        )
+
+        available_cash = st.number_input(
+            "可用現金",
+            min_value=0,
+            value=1000000,
+            step=10000,
+            format="%d",
+        )
+
+        target_buy_price = st.number_input(
+            "預計掛單價格",
+            min_value=0.0,
+            value=95.50,
+            step=0.05,
+            format="%.2f",
+        )
+
+        estimated_shares = int(available_cash // (target_buy_price * 1000)) if target_buy_price > 0 else 0
+
+        col_a, col_b, col_c = st.columns(3)
+        col_a.metric("盤中價格", format_price(intraday_price))
+        col_b.metric("可用現金", f"新台幣 {available_cash:,.0f}")
+        col_c.metric("可買張數", f"{estimated_shares} 張")
+
+        st.divider()
+
         col1, col2, col3 = st.columns(3)
-        col1.metric("最新價格", format_price(result["latest_price"]))
+        col1.metric("最新收盤價", format_price(result["latest_price"]))
         col2.metric("AI評分", f"{result['score']}/100")
         col3.metric("操作建議", result["recommendation"])
 
@@ -265,7 +327,7 @@ with tab_0050:
             st.write(f"- {reason}")
 
         st.subheader("0050 價格趨勢")
-        st.line_chart(result["close"])
+        safe_price_chart(result["close"], title="0050 價格趨勢")
 
 
 # =========================
@@ -320,4 +382,4 @@ with tab_stock:
                 st.write(f"- {reason}")
 
             st.subheader("價格趨勢")
-            st.line_chart(result["close"])
+            safe_price_chart(result["close"], title=f"{user_input} 價格趨勢")
