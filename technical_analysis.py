@@ -6,7 +6,14 @@ import pandas as pd
 def clean_close(data: pd.DataFrame) -> pd.Series:
     if data is None or data.empty or "Close" not in data:
         return pd.Series(dtype="float64")
-    return pd.to_numeric(data["Close"], errors="coerce").dropna()
+    try:
+        close = data["Close"]
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0]
+        close = pd.to_numeric(close, errors="coerce")
+        return close.dropna()
+    except Exception:
+        return pd.Series(dtype="float64")
 
 
 def moving_average(close: pd.Series, window: int) -> pd.Series:
@@ -115,29 +122,31 @@ def distance_from(reference: float | None, price: float | None) -> float | None:
 
 def build_technical_snapshot(data: pd.DataFrame) -> dict[str, float | None]:
     close = clean_close(data)
+    print("len(close):", len(close))
     if close.empty:
         return {}
 
     latest = float(close.iloc[-1])
-    data_points = len(close)
-    if data_points >= 120:
-        analysis_level = "完整分析"
-    elif data_points >= 60:
-        analysis_level = "中階分析"
-    elif data_points >= 20:
-        analysis_level = "簡化分析"
+    if len(close) >= 120:
+        analysis_level = "full"
+    elif len(close) >= 60:
+        analysis_level = "mid"
+    elif len(close) >= 20:
+        analysis_level = "basic"
     else:
-        analysis_level = "極簡分析"
+        analysis_level = "minimal"
+    print("analysis mode:", analysis_level)
 
-    ma20 = latest_value(moving_average(close, 20)) if data_points >= 20 else None
-    ma60 = latest_value(moving_average(close, 60)) if data_points >= 60 else None
-    ma120 = latest_value(moving_average(close, 120)) if data_points >= 120 else None
+    data_points = len(close)
+    ma20 = latest_value(moving_average(close, 20))
+    ma60 = latest_value(moving_average(close, 60)) if data_points >= 20 else None
+    ma120 = latest_value(moving_average(close, 120)) if data_points >= 60 else None
     recent_high, recent_drawdown = recent_high_drawdown(close)
     simple_return = pct_change(float(close.iloc[-2]), latest) if data_points >= 2 else 0.0
     return {
         "data_points": data_points,
         "analysis_level": analysis_level,
-        "is_simplified": analysis_level != "完整分析",
+        "is_simplified": analysis_level != "full",
         "latest_price": latest,
         "ma20": ma20,
         "ma60": ma60,
@@ -147,7 +156,7 @@ def build_technical_snapshot(data: pd.DataFrame) -> dict[str, float | None]:
         "recent_high_drawdown": recent_drawdown,
         "one_year_return": one_year_return(close),
         "ytd_return": ytd_return(close),
-        "annual_volatility": annual_volatility(close.tail(252)),
+        "annual_volatility": annual_volatility(close),
         "max_drawdown": max_drawdown(close),
         "simple_return": simple_return,
         "distance_ma20": distance_from(ma20, latest),

@@ -30,22 +30,23 @@ def score_trend(tech: dict[str, float | None]) -> tuple[int, list[str]]:
     if price is None:
         return 50, ["價格資料不足，趨勢分數採中性。"]
 
+    used_indicators = 0
     for key, label, points in (("ma20", "MA20", 8), ("ma60", "MA60", 10), ("ma120", "MA120", 12)):
         ma = tech.get(key)
         if price is not None and ma is not None and price > ma:
+            used_indicators += 1
             score += points
             reasons.append(f"價格站上 {label}。")
         elif price is not None and ma is not None:
+            used_indicators += 1
             score -= 4
             reasons.append(f"價格低於 {label}。")
-        else:
-            reasons.append(f"{label} 資料不足，該項採中性。")
     rsi = tech.get("rsi")
     if rsi is not None and rsi > 72:
         score -= 12
         reasons.append("RSI 偏高，追價風險升高。")
-    elif rsi is None:
-        reasons.append("RSI 資料不足，動能過熱判斷採中性。")
+    if used_indicators == 0:
+        reasons.append("均線資料不足，趨勢分數維持基準值。")
     return clamp_score(score), reasons
 
 
@@ -70,8 +71,6 @@ def score_price_position(tech: dict[str, float | None]) -> tuple[int, list[str]]
     if distance_ma120 is not None and abs(distance_ma120) <= 3:
         score += 8
         reasons.append("價格接近 MA120 支撐區。")
-    elif distance_ma120 is None:
-        reasons.append("MA120 資料不足，長期支撐判斷採中性。")
     return clamp_score(score), reasons
 
 
@@ -115,9 +114,6 @@ def make_decision(
         + price_score * 0.20
         + risk_score * 0.20
     )
-    if tech.get("is_simplified"):
-        total = clamp_score(total - 3)
-
     rsi = tech.get("rsi")
     drawdown = tech.get("recent_high_drawdown") or 0.0
     max_buy_lots = int(portfolio.get("max_buy_lots", 0))
@@ -161,8 +157,7 @@ def make_decision(
         "個人持倉風控分數": risk_score,
     }
     reasons = trend_reasons + price_reasons + risk_reasons
-    if tech.get("is_simplified"):
-        reasons.insert(0, f"目前使用{tech.get('analysis_level', '簡化分析')}，部分指標不足，AI 分數已保守調整。")
+    reasons.insert(0, f"analysis mode: {tech.get('analysis_level', 'minimal')}")
     reasons.append(str(market.get("text", "市場背景資料有限。")))
     reasons.append(f"成交量判讀：{volume.get('volume_signal', '量能資料不足')}。")
 

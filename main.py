@@ -115,6 +115,7 @@ def run_analysis_page(label: str, ticker: str, prefix: str, start: date, end: da
         return
     if tech.get("is_simplified"):
         st.info("目前使用簡化分析（資料不足）")
+    st.caption(f"分析模式：{tech.get('analysis_level', 'minimal')}")
 
     volume = analyze_volume(analysis_data, inputs["manual_volume"])
     market = get_market_background(start, end)
