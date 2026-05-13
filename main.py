@@ -1,5 +1,3 @@
-Add a new tab called「台股AI分析」to the existing Streamlit dashboard.
-
 Important:
 - Do not modify the existing 0050 dashboard logic.
 - Do not re-enable the comparison tab.
