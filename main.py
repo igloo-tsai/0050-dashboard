@@ -16,8 +16,10 @@ from ui_components import (
     inject_mobile_css,
     render_final_action_card,
     render_market_factor_card,
+    render_position_summary_card,
     render_portfolio_table,
     render_price_trend_chart,
+    render_risk_detail,
     render_score_cards,
     render_volume_card,
 )
@@ -77,14 +79,14 @@ def render_inputs(prefix: str, default_price: float) -> dict[str, float | None]:
     st.subheader("投資參數")
     cols = st.columns(2)
     with cols[0]:
-        holding_lots = st.number_input("目前持有張數", min_value=0.0, value=0.0, step=1.0, key=f"{prefix}_holding_lots")
-        average_cost = st.number_input("目前平均成本", min_value=0.0, value=0.0, step=0.1, key=f"{prefix}_average_cost")
-        cash = st.number_input("可用現金", min_value=0.0, value=100_000.0, step=10_000.0, key=f"{prefix}_cash")
-        intraday_price = st.number_input("今日盤中價格", min_value=0.0, value=float(default_price), step=0.05, key=f"{prefix}_intraday_price")
+        holding_lots = st.number_input("目前已持有幾張", min_value=0.0, value=0.0, step=1.0, key=f"{prefix}_holding_lots")
+        average_cost = st.number_input("目前每股平均成本", min_value=0.0, value=0.0, step=0.1, key=f"{prefix}_average_cost")
+        cash = st.number_input("可投入現金", min_value=0.0, value=100_000.0, step=10_000.0, key=f"{prefix}_cash")
+        intraday_price = st.number_input("目前市價", min_value=0.0, value=float(default_price), step=0.05, key=f"{prefix}_intraday_price")
     with cols[1]:
         manual_volume = st.number_input("今日成交量，可選填", min_value=0.0, value=0.0, step=1000.0, key=f"{prefix}_manual_volume")
-        max_single = st.number_input("單次最多投入金額", min_value=0.0, value=100_000.0, step=10_000.0, key=f"{prefix}_max_single")
-        max_ratio = st.slider("目標最大股票資產比例", min_value=0, max_value=100, value=70, step=5, key=f"{prefix}_max_ratio")
+        max_single = st.number_input("這次最多想投入多少", min_value=0.0, value=100_000.0, step=10_000.0, key=f"{prefix}_max_single")
+        max_ratio = st.slider("股票部位上限", min_value=0, max_value=100, value=70, step=5, key=f"{prefix}_max_ratio")
     return {
         "holding_lots": holding_lots,
         "average_cost": average_cost,
@@ -137,13 +139,16 @@ def run_analysis_page(label: str, ticker: str, prefix: str, start: date, end: da
     )
 
     st.caption(f"分析標的：{display_name(label, resolved_ticker)}｜最新收盤價：{format_price(latest_close)}｜盤中價格：{format_price(current_price)}")
+    render_position_summary_card(portfolio)
     render_final_action_card(decision, portfolio)
-    render_score_cards(decision.module_scores, decision.total_score)
-    render_volume_card(volume)
-    render_market_factor_card(market)
-    render_portfolio_table(portfolio)
 
-    with st.expander("技術細節", expanded=False):
+    with st.expander("進階分析細節", expanded=False):
+        render_risk_detail(decision)
+        render_score_cards(decision.module_scores, decision.total_score)
+        render_volume_card(volume)
+        render_market_factor_card(market)
+        render_portfolio_table(portfolio)
+        st.subheader("技術細節")
         detail_cols = st.columns(4)
         with detail_cols[0]:
             st.metric("RSI", "無資料" if tech.get("rsi") is None else f"{tech['rsi']:.1f}")
