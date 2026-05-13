@@ -225,9 +225,20 @@ def moving_average(prices: pd.Series, window: int) -> pd.Series:
 
 def normalize_to_100(prices: pd.DataFrame) -> pd.DataFrame:
     clean = prices.dropna(how="all").copy()
+
     for column in clean.columns:
-        first = clean[column].dropna().iloc[0]
+        series = clean[column].dropna()
+
+        if series.empty:
+            continue  # 防止空資料 crash
+
+        first = series.iloc[0]
+
+        if first == 0:
+            continue  # 防止除以0
+
         clean[column] = clean[column] / first * 100.0
+
     return clean
 
 
