@@ -35,124 +35,39 @@ def format_ratio(value: float | None) -> str:
 
 
 def inject_mobile_css() -> None:
+    """Small, safe CSS only. No HTML cards are used for rendering content."""
     st.markdown(
         """
         <style>
         * { box-sizing: border-box; }
-
-        .block-container {
-            padding-top: 1.2rem;
-            padding-bottom: 2rem;
+        .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
+        h1 { line-height: 1.15 !important; }
+        h2, h3 { line-height: 1.25 !important; }
+        [data-testid="stMetric"] {
+            border: 1px solid rgba(255,255,255,.16);
+            border-radius: 12px;
+            padding: .8rem .9rem;
+            background: rgba(255,255,255,.045);
         }
-
-        .final-action-card,
-        .position-summary-card {
-            overflow-wrap: anywhere;
-            word-break: break-word;
+        [data-testid="stMetric"] label,
+        [data-testid="stMetric"] [data-testid="stMetricValue"],
+        [data-testid="stMetric"] [data-testid="stMetricDelta"] {
+            white-space: normal !important;
+            overflow-wrap: anywhere !important;
+            line-height: 1.25 !important;
         }
-
-        .decision-grid,
-        .position-grid {
-            display: grid;
-            gap: 12px;
+        [data-testid="stMetric"] [data-testid="stMetricValue"] {
+            font-size: 1.22rem !important;
+            font-weight: 800 !important;
         }
-
-        .decision-grid {
-            grid-template-columns: repeat(4, minmax(0, 1fr));
-        }
-
-        .position-grid {
-            grid-template-columns: repeat(3, minmax(0, 1fr));
-        }
-
-        .card-stat {
-            background: rgba(255, 255, 255, 0.10);
-            border: 1px solid rgba(255, 255, 255, 0.16);
-            border-radius: 10px;
-            padding: 12px;
-            min-height: 74px;
-        }
-
-        .card-label {
-            color: #d1d5db;
-            font-size: 13px;
-            margin-bottom: 5px;
-            line-height: 1.25;
-        }
-
-        .card-value {
-            color: #ffffff;
-            font-size: 20px;
-            font-weight: 800;
-            line-height: 1.25;
-        }
-
-        .decision-section-title {
-            color: #ffffff;
-            font-size: 17px;
-            font-weight: 800;
-            margin: 16px 0 9px;
-        }
-
-        .decision-main-text {
-            color: #ffffff;
-            font-size: 18px;
-            font-weight: 800;
-            line-height: 1.55;
-            margin-top: 4px;
-        }
-
-        .decision-detail-text {
-            color: #e5e7eb;
-            margin-top: 10px;
-            line-height: 1.7;
-        }
-
-        .risk-track {
-            height: 10px;
-            background: rgba(255,255,255,.25);
-            border-radius: 999px;
-            overflow: hidden;
-            margin-top: 6px;
-        }
-
-        .risk-fill {
-            height: 10px;
-            background: #ef4444;
-            border-radius: 999px;
-        }
-
+        div[data-testid="stAlert"] { border-radius: 12px; }
         @media (max-width: 768px) {
-            .block-container {
-                padding: 0.9rem 0.75rem 2rem !important;
-                max-width: 100% !important;
-            }
-
-            h1 {
-                font-size: 1.55rem !important;
-                line-height: 1.25 !important;
-            }
-
-            h2, h3 {
-                font-size: 1.12rem !important;
-                line-height: 1.3 !important;
-            }
-
-            .final-action-card,
-            .position-summary-card {
-                padding: 16px !important;
-                font-size: 1rem !important;
-                line-height: 1.45 !important;
-            }
-
-            .decision-grid,
-            .position-grid {
-                grid-template-columns: 1fr !important;
-            }
-
-            .card-value {
-                font-size: 18px !important;
-            }
+            .block-container { padding: .75rem .7rem 1.6rem; max-width: 100%; }
+            h1 { font-size: 1.45rem !important; }
+            h2 { font-size: 1.2rem !important; }
+            h3 { font-size: 1.08rem !important; }
+            [data-testid="stMetric"] { padding: .7rem .75rem; }
+            [data-testid="stMetric"] [data-testid="stMetricValue"] { font-size: 1.05rem !important; }
         }
         </style>
         """,
@@ -160,113 +75,489 @@ def inject_mobile_css() -> None:
     )
 
 
-def decision_colors(action_label: str) -> tuple[str, str]:
-    label = str(action_label or "")
-    if any(keyword in label for keyword in ("積極", "分批", "可加碼")):
-        return "#064e3b", "#10b981"
-    if any(keyword in label for keyword in ("觀察", "試單", "小量")):
-        return "#78350f", "#f59e0b"
-    return "#7f1d1d", "#ef4444"
+def _decision_tone(action_label: str) -> str:
+    if action_label in ("積極加碼", "分批加碼", "可加碼", "可分批加碼"):
+        return "green"
+    if action_label in ("觀察", "試單", "小量試單", "持有觀察"):
+        return "yellow"
+    return "red"
+
+
+def _short_action_label(action_label: str) -> str:
+    mapping = {
+        "積極加碼": "可加碼",
+        "分批加碼": "分批",
+        "試單": "試單",
+        "觀察": "觀察",
+        "暫緩進場": "暫緩",
+    }
+    return mapping.get(action_label, action_label or "觀察")
+
+
+def _alert_decision(tone: str, line: str) -> None:
+    if tone == "green":
+        st.success(line)
+    elif tone == "yellow":
+        st.warning(line)
+    else:
+        st.error(line)
+
+
+def _trader_status(decision) -> tuple[str, str]:
+    today_status = getattr(decision, "today_status", "") or ""
+    if today_status == "禁止加碼":
+        return "red", "🔴 暫緩進場（高風險）"
+    if today_status == "等待回檔":
+        return "yellow", "🟡 等待回檔（觀察）"
+    return "green", "🟢 可進場（低風險）"
+
+
+def render_trader_decision_card(decision, portfolio: dict[str, object]) -> None:
+    tone, headline = _trader_status(decision)
+    lots = int(getattr(decision, "suggested_buy_lots", 0) or 0)
+    shares = int(getattr(decision, "suggested_buy_shares", 0) or 0)
+    today_status = getattr(decision, "today_status", "等待回檔") or "等待回檔"
+    next_action = getattr(decision, "next_action", "現在不買，等待合理價。") or "現在不買，等待合理價。"
+    observation_price = getattr(decision, "observation_price", None)
+    reasonable_price = getattr(decision, "reasonable_price", getattr(decision, "suggested_bid", None))
+    conservative_price = getattr(decision, "conservative_price", getattr(decision, "conservative_bid", None))
+    entry_probability = int(getattr(decision, "entry_probability", 0) or 0)
+    position_mode_label = getattr(decision, "position_mode_label", "") or ""
+    trade_plan = list(getattr(decision, "trade_plan", []) or [])
+    first_batch = trade_plan[0] if trade_plan else {}
+    second_batch = trade_plan[1] if len(trade_plan) > 1 else {}
+    first_lots = int(first_batch.get("lots", 0) or 0)
+    first_shares = int(first_batch.get("shares", 0) or 0)
+    second_lots = int(second_batch.get("lots", 0) or 0)
+    second_shares = int(second_batch.get("shares", 0) or 0)
+
+    st.subheader("交易員模式")
+    _alert_decision(tone, headline)
+
+    st.markdown("#### 今日狀態")
+    status_cols = st.columns(4)
+    status_cols[0].metric("狀態", today_status)
+    status_cols[1].metric("交易模式", position_mode_label)
+    status_cols[2].metric("整股", f"{lots} 張")
+    status_cols[3].metric("零股", f"{shares} 股")
+
+    hint_cols = st.columns(2)
+    hint_cols[0].metric("第一批可買", f"{first_lots} 張 {first_shares} 股")
+    hint_cols[1].metric("跌到合理價可買", f"{second_lots} 張 {second_shares} 股")
+
+    st.markdown("#### 今日動作")
+    if tone == "green":
+        st.success(next_action)
+    elif tone == "yellow":
+        st.warning(next_action)
+    else:
+        st.error(next_action)
+
+    st.markdown("#### 分批買進策略")
+    price_cols = st.columns(3)
+    price_cols[0].metric("觀察價", format_price(observation_price))
+    price_cols[1].metric("合理價", format_price(reasonable_price))
+    price_cols[2].metric("保守價", format_price(conservative_price))
+
+    if trade_plan:
+        for row in trade_plan:
+            with st.container():
+                batch_ratio = float(row.get("batch_ratio", 0.0) or 0.0)
+                st.markdown(f"##### {row.get('batch_title', row.get('level_name', ''))}")
+                st.caption(f"投入 {batch_ratio * 100:.0f}% 預算")
+                plan_cols = st.columns(4)
+                plan_cols[0].metric("價格", format_price(float(row.get("price", 0.0) or 0.0)))
+                plan_cols[1].metric("預算", f"{format_price(float(row.get('batch_budget', 0.0) or 0.0))}（{batch_ratio * 100:.0f}%）")
+                plan_cols[2].metric("可買", f"{int(row.get('lots', 0) or 0)} 張 {int(row.get('shares', 0) or 0)} 股")
+                plan_cols[3].metric("投入", format_price(float(row.get("amount", 0.0) or 0.0)))
+                result_cols = st.columns(3)
+                result_cols[0].metric("成交後平均成本", format_price(float(row.get("after_batch_average_cost", 0.0) or 0.0)))
+                result_cols[1].metric("成交後股票比例", format_ratio(float(row.get("after_batch_stock_ratio", 0.0) or 0.0)))
+                result_cols[2].metric("成交後剩餘現金", format_price(float(row.get("after_batch_cash", 0.0) or 0.0)))
+                if row.get("over_limit_after_batch"):
+                    st.warning("此批會超過部位上限")
+                st.caption(str(row.get("action_text", "")))
+        last_row = trade_plan[-1]
+        st.markdown("#### 若三批都成交")
+        total_cols = st.columns(5)
+        total_cols[0].metric("合計投入", format_price(float(last_row.get("cumulative_amount", 0.0) or 0.0)))
+        total_cols[1].metric("合計買入", f"{int(last_row.get('cumulative_lots', 0) or 0)} 張 {int(last_row.get('cumulative_shares', 0) or 0)} 股")
+        total_cols[2].metric("最終平均成本", format_price(float(last_row.get("after_batch_average_cost", 0.0) or 0.0)))
+        total_cols[3].metric("最終股票比例", format_ratio(float(last_row.get("after_batch_stock_ratio", 0.0) or 0.0)))
+        total_cols[4].metric("剩餘現金", format_price(float(last_row.get("after_batch_cash", 0.0) or 0.0)))
+    else:
+        st.warning("目前無法產生分批買進策略。")
+
+    st.markdown("#### 機率")
+    st.metric("進場機率", f"{entry_probability}%")
+
+
+def render_today_action(decision) -> None:
+    next_action = getattr(decision, "next_action", "先觀察，不追價。") or "先觀察，不追價。"
+    st.subheader("今日動作")
+    st.markdown(f"### 👉 {next_action}")
+
+
+def render_key_reasons(decision) -> None:
+    st.subheader("關鍵原因")
+    reasons = list(getattr(decision, "primary_reasons", []) or [])[:3]
+    if not reasons:
+        reasons = ["目前訊號尚未完全確認，先以價格與部位風控為主。"]
+    for idx, reason in enumerate(reasons, 1):
+        st.write(f"{idx}. {reason}")
+
+
+def _inventory_consistency_warnings(records: list[dict[str, object]]) -> list[str]:
+    warnings: list[str] = []
+    for idx, record in enumerate(records, 1):
+        side = str(record.get("side", "") or "")
+        price = float(record.get("price", 0.0) or 0.0)
+        shares = int(record.get("shares", 0) or 0)
+        gross_amount = float(record.get("gross_amount", 0.0) or 0.0)
+        fee = float(record.get("fee", 0.0) or 0.0)
+        tax = float(record.get("tax", 0.0) or 0.0)
+        transaction_cost = float(record.get("transaction_cost", 0.0) or 0.0)
+        net_amount = float(record.get("net_amount", 0.0) or 0.0)
+        expected_gross = round(price * shares, 0)
+        expected_cost = round(fee + tax, 0)
+        expected_net = expected_gross + fee + tax if side == "買入" else expected_gross - fee - tax
+
+        if abs(gross_amount - expected_gross) > 1:
+            warnings.append(f"第 {idx} 筆成交金額不一致，應為 {format_price(expected_gross)}。")
+        if abs(transaction_cost - expected_cost) > 1:
+            warnings.append(f"第 {idx} 筆單筆交易成本不一致，應為 {format_price(expected_cost)}。")
+        if abs(net_amount - round(expected_net, 0)) > 1:
+            warnings.append(f"第 {idx} 筆淨收付金額不一致，請檢查手續費或交易稅。")
+    return warnings
+
+
+def render_inventory_records(records: list[dict[str, object]], current_price: float | None = None) -> None:
+    st.caption(f"目前已載入 {len(records)} 筆庫存")
+    if not records:
+        st.info("尚未建立逐筆庫存。")
+        return
+    warnings = _inventory_consistency_warnings(records)
+    if warnings:
+        st.warning("庫存自我檢查發現資料不一致：")
+        for warning in warnings:
+            st.write(f"- {warning}")
+    display = pd.DataFrame(records)
+    if current_price is not None and current_price > 0 and not display.empty:
+        display["current_price"] = float(current_price)
+        display["unrealized_pnl"] = display.apply(
+            lambda row: (float(row.get("shares", 0) or 0) * float(current_price) - float(row.get("net_amount", 0) or 0))
+            if str(row.get("side", "") or "") == "買入"
+            else 0.0,
+            axis=1,
+        )
+        display["unrealized_pnl_pct"] = display.apply(
+            lambda row: float(row["unrealized_pnl"]) / float(row.get("net_amount", 0) or 1) * 100
+            if str(row.get("side", "") or "") == "買入" and float(row.get("net_amount", 0) or 0) > 0
+            else 0.0,
+            axis=1,
+        )
+    ordered_columns = [
+        "ticker",
+        "name",
+        "date",
+        "side",
+        "price",
+        "current_price",
+        "lots",
+        "odd_shares",
+        "shares",
+        "gross_amount",
+        "fee",
+        "fee_source",
+        "tax",
+        "transaction_cost",
+        "net_amount",
+        "unrealized_pnl",
+        "unrealized_pnl_pct",
+        "note",
+    ]
+    display = display[[column for column in ordered_columns if column in display.columns]]
+    column_map = {
+        "date": "日期",
+        "ticker": "代碼",
+        "name": "名稱",
+        "side": "類型",
+        "price": "買入價格",
+        "current_price": "現價",
+        "lots": "張數",
+        "odd_shares": "零股",
+        "shares": "股數",
+        "gross_amount": "成交金額",
+        "fee": "手續費",
+        "fee_source": "手續費來源",
+        "tax": "交易稅",
+        "transaction_cost": "單筆交易成本",
+        "net_amount": "淨收付金額",
+        "unrealized_pnl": "未實現損益",
+        "unrealized_pnl_pct": "損益 %",
+        "note": "備註",
+    }
+    display = display.rename(columns=column_map)
+    if "損益 %" in display.columns:
+        styled = display.style.map(
+            lambda value: "color: #22c55e" if float(value or 0) >= 0 else "color: #ef4444",
+            subset=["損益 %"],
+        )
+        st.dataframe(styled, hide_index=True, use_container_width=True)
+    else:
+        st.dataframe(display, hide_index=True, use_container_width=True)
+
+
+def render_transaction_performance(records: list[dict[str, object]]) -> None:
+    st.subheader("交易成本與績效")
+    if not records:
+        st.info("尚無交易紀錄可計算績效。")
+        return
+
+    total_fee = sum(float(record.get("fee", 0.0) or 0.0) for record in records)
+    total_tax = sum(float(record.get("tax", 0.0) or 0.0) for record in records)
+    total_buy_net = sum(float(record.get("net_amount", 0.0) or 0.0) for record in records if record.get("side") == "買入")
+    total_sell_net = sum(float(record.get("net_amount", 0.0) or 0.0) for record in records if record.get("side") == "賣出")
+    profit = total_sell_net - total_buy_net
+    true_return = profit / total_buy_net * 100 if total_buy_net > 0 else 0.0
+    total_cost = total_fee + total_tax
+
+    cols = st.columns(4)
+    cols[0].metric("交易成本合計", format_price(total_cost))
+    cols[1].metric("累積手續費", format_price(total_fee))
+    cols[2].metric("累積稅金", format_price(total_tax))
+    cols[3].metric("真實報酬率（含費用）", format_pct(true_return))
+
+    detail = pd.DataFrame(
+        [
+            {"項目": "買入淨額", "金額": format_price(total_buy_net)},
+            {"項目": "賣出淨額", "金額": format_price(total_sell_net)},
+            {"項目": "已實現損益（賣出淨額 - 買入淨額）", "金額": format_price(profit)},
+        ]
+    )
+    st.dataframe(detail, hide_index=True, use_container_width=True)
+
+
+def _calculate_trade_log_stats(records: list[dict[str, object]], portfolio: dict[str, object]) -> dict[str, float]:
+    total_buy_net = 0.0
+    realized_pnl = 0.0
+    open_shares = 0
+    open_cost = 0.0
+    closed_trades = 0
+    winning_trades = 0
+
+    for record in records:
+        action = str(record.get("action", "") or "")
+        shares = int(record.get("shares", 0) or 0)
+        net_amount = float(record.get("net_amount", record.get("amount", 0.0)) or 0.0)
+        if shares <= 0 or net_amount <= 0:
+            continue
+
+        if action == "買入":
+            total_buy_net += net_amount
+            open_shares += shares
+            open_cost += net_amount
+            continue
+
+        if action != "賣出":
+            continue
+
+        if open_shares > 0 and open_cost > 0:
+            matched_shares = min(shares, open_shares)
+            average_cost = open_cost / open_shares
+            matched_cost = average_cost * matched_shares
+            trade_profit = net_amount - matched_cost
+            realized_pnl += trade_profit
+            closed_trades += 1
+            if trade_profit > 0:
+                winning_trades += 1
+            open_shares -= matched_shares
+            open_cost = max(0.0, open_cost - matched_cost)
+        else:
+            realized_pnl += net_amount
+
+    unrealized_pnl = float(portfolio.get("unrealized_pnl", 0.0) or 0.0)
+    total_profit = realized_pnl + unrealized_pnl
+    total_return = total_profit / total_buy_net * 100 if total_buy_net > 0 else 0.0
+    win_rate = winning_trades / closed_trades * 100 if closed_trades > 0 else 0.0
+    return {
+        "total_return": total_return,
+        "unrealized_pnl": unrealized_pnl,
+        "realized_pnl": realized_pnl,
+        "win_rate": win_rate,
+    }
+
+
+def render_trade_log_performance(records: list[dict[str, object]], portfolio: dict[str, object]) -> None:
+    st.subheader("📊 交易績效")
+    if not records:
+        st.info("尚無 trade_log 交易紀錄。")
+        return
+
+    stats = _calculate_trade_log_stats(records, portfolio)
+    cols = st.columns(4)
+    cols[0].metric("總報酬率", format_pct(stats["total_return"]))
+    cols[1].metric("未實現損益", format_price(stats["unrealized_pnl"]))
+    cols[2].metric("已實現損益", format_price(stats["realized_pnl"]))
+    cols[3].metric("勝率", f"{stats['win_rate']:.2f}%")
+
+
+def render_trade_log_records(records: list[dict[str, object]]) -> None:
+    st.subheader("交易紀錄")
+    st.caption(f"目前已記錄 {len(records)} 筆交易")
+    if not records:
+        st.info("尚無交易紀錄。")
+        return
+
+    display = pd.DataFrame(records)
+    column_map = {
+        "date": "日期",
+        "action": "買賣",
+        "price": "成交價",
+        "shares": "股數",
+        "amount": "成交金額",
+        "fee": "手續費",
+        "tax": "交易稅",
+        "net_amount": "淨收付金額",
+    }
+    display = display.rename(columns=column_map)
+    st.dataframe(display, hide_index=True, use_container_width=True)
+
+
+def render_holding_pnl_card(portfolio: dict[str, object]) -> None:
+    st.subheader("持倉損益")
+    holding_lots = float(portfolio.get("holding_lots", 0.0) or 0.0)
+    shares = float(portfolio.get("shares", 0.0) or 0.0)
+    if holding_lots <= 0 or shares <= 0:
+        st.info("尚未持有，目前無未實現損益。")
+        return
+
+    cols = st.columns(2)
+    cols[0].metric("持有", f"{holding_lots:g} 張 / {shares:,.0f} 股")
+    cols[1].metric("平均成本", format_price(float(portfolio.get("average_cost", 0.0) or 0.0)))
+
+    cols = st.columns(2)
+    cols[0].metric("目前市價", format_price(float(portfolio.get("current_price", 0.0) or 0.0)))
+    cols[1].metric("股票比例", format_ratio(float(portfolio.get("current_stock_ratio", 0.0) or 0.0)))
+
+    cols = st.columns(2)
+    cols[0].metric("總成本", format_price(float(portfolio.get("cost_value", 0.0) or 0.0)))
+    cols[1].metric("市值", format_price(float(portfolio.get("market_value", 0.0) or 0.0)))
+
+    pnl = float(portfolio.get("unrealized_pnl", 0.0) or 0.0)
+    pnl_pct = float(portfolio.get("unrealized_pnl_pct", 0.0) or 0.0)
+    cols = st.columns(2)
+    cols[0].metric("未實現損益", format_price(pnl))
+    cols[1].metric("報酬率", format_pct(pnl_pct))
+    st.metric("可用現金", format_price(float(portfolio.get("available_cash", portfolio.get("cash", 0.0)) or 0.0)))
 
 
 def render_position_summary_card(portfolio: dict[str, object]) -> None:
+    """Mobile-first position summary: only the information needed for action."""
     market_value = float(portfolio.get("market_value", 0.0) or 0.0)
     cash = float(portfolio.get("cash", 0.0) or 0.0)
     total_assets = float(portfolio.get("total_assets", 0.0) or 0.0)
     stock_ratio = float(portfolio.get("current_stock_ratio", 0.0) or 0.0)
     target_ratio = float(portfolio.get("max_stock_ratio", 0.0) or 0.0)
-    excess = max(0.0, float(portfolio.get("excess_stock_ratio", 0.0) or 0.0))
+    excess = float(portfolio.get("excess_stock_ratio", 0.0) or 0.0)
     over_target = bool(portfolio.get("over_target_ratio", False))
 
-    status = f"已超標 {excess:.1f}%，不建議加碼" if over_target else "未超標，可依訊號控管部位"
-    border = "#ef4444" if over_target else "#10b981"
+    st.subheader("部位摘要")
+    cols = st.columns(4)
+    cols[0].metric("持倉市值", format_price(market_value))
+    cols[1].metric("股票比例", format_ratio(stock_ratio))
+    cols[2].metric("可用現金", format_price(cash))
+    cols[3].metric("狀態", "超標" if over_target else "未超標")
 
-    html = f"""
-    <div class="position-summary-card" style="
-        border-left: 6px solid {border};
-        background-color: #111827;
-        color: #ffffff;
-        border-radius: 12px;
-        padding: 18px;
-        margin: 12px 0 16px 0;
-    ">
-        <div style="font-size:20px;font-weight:800;margin-bottom:12px;">目前部位摘要</div>
-        <div class="position-grid">
-            <div class="card-stat"><div class="card-label">目前持倉市值</div><div class="card-value">{format_price(market_value)}</div></div>
-            <div class="card-stat"><div class="card-label">可用現金</div><div class="card-value">{format_price(cash)}</div></div>
-            <div class="card-stat"><div class="card-label">總資產估算</div><div class="card-value">{format_price(total_assets)}</div></div>
-            <div class="card-stat"><div class="card-label">股票資產比例</div><div class="card-value">{format_ratio(stock_ratio)}</div></div>
-            <div class="card-stat"><div class="card-label">目標上限</div><div class="card-value">{format_ratio(target_ratio)}</div></div>
-            <div class="card-stat"><div class="card-label">狀態</div><div class="card-value">{status}</div></div>
-        </div>
-    </div>
-    """
-    st.markdown(html, unsafe_allow_html=True)
+    if over_target:
+        st.error(f"股票部位已超過上限 {excess:.1f}%，今天不應再加碼。")
+    else:
+        st.caption(f"目標上限：{format_ratio(target_ratio)}｜總資產估算：{format_price(total_assets)}")
 
 
 def render_final_action_card(decision, portfolio: dict[str, object]) -> None:
-    """Render final decision card using native Streamlit widgets.
+    """Backward-compatible wrapper for old call sites."""
+    render_trader_decision_card(decision, portfolio)
+    render_today_action(decision)
+    render_key_reasons(decision)
 
-    This intentionally avoids inner HTML for the decision content because some
-    Streamlit/Markdown states can display nested HTML as raw text. Native widgets
-    are safer for the trading dashboard and mobile viewing.
-    """
+
+def render_self_check(decision) -> None:
+    st.subheader("系統自我檢查")
+    flags = list(getattr(decision, "conflict_flags", []) or [])
+    if not flags:
+        st.success("✅ 通過，未發現衝突")
+        return
+    st.warning("⚠️ 發現以下衝突：")
+    for flag in flags:
+        st.write(f"- {flag}")
+
+
+def render_trade_record_summary(decision) -> None:
+    st.subheader("本次決策紀錄摘要")
+    record = getattr(decision, "trade_record", {}) or {}
+    if not record:
+        st.caption("目前沒有可顯示的決策紀錄。")
+        return
+    rows = [{"項目": key, "內容": value} for key, value in record.items()]
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+
+def render_legacy_final_action_card(decision, portfolio: dict[str, object]) -> None:
+    """Kept for reference; native Streamlit only; no content HTML."""
     action_label = getattr(decision, "action_label", "觀察") or "觀察"
+    short_label = _short_action_label(action_label)
     suggested_lots = int(getattr(decision, "suggested_buy_lots", 0) or 0)
     chase_today = getattr(decision, "chase_today", "否") or "否"
     suggested_bid = getattr(decision, "suggested_bid", None)
-    suggested_bid_text = "不掛單" if suggested_lots <= 0 else format_price(suggested_bid)
-
-    after_avg = getattr(decision, "after_buy_average_cost", None)
-    after_cash = getattr(decision, "after_buy_remaining_cash", None)
-    after_ratio = getattr(decision, "after_buy_stock_ratio", None)
-
-    if suggested_lots <= 0:
-        avg_cost_text = f"未加碼，平均成本維持：{format_price(after_avg)}"
-        cash_text = f"未加碼，剩餘現金維持：{format_price(after_cash)}"
-        ratio_text = f"未加碼，股票資產比例維持：{format_ratio(after_ratio)}"
-    else:
-        avg_cost_text = f"買完後平均成本：{format_price(after_avg)}"
-        cash_text = f"買完後剩餘現金：{format_price(after_cash)}"
-        ratio_text = f"買完後股票資產比例：{format_ratio(after_ratio)}"
-
-    over_limit = "是" if bool(getattr(decision, "over_position_limit_after_buy", False)) else "否"
+    suggested_price_text = "不掛單" if suggested_lots <= 0 else format_price(suggested_bid)
+    entry_probability = int(getattr(decision, "entry_probability", 0) or 0)
+    risk_label = getattr(decision, "risk_bar_label", "") or getattr(decision, "risk_level", "") or "風險未定"
     next_action = getattr(decision, "next_action", "先觀察，不追價。") or "先觀察，不追價。"
-    primary_reasons = list(getattr(decision, "primary_reasons", []) or [])[:3]
-    if not primary_reasons:
-        primary_reasons = ["目前訊號偏中性，先以風控與價格位置為主。"]
+    tone = _decision_tone(action_label)
 
-    st.subheader("AI最終行動建議")
+    st.subheader("AI決策")
+    headline = f"今日建議：{short_label}｜{suggested_lots} 張｜{suggested_price_text}"
+    _alert_decision(tone, headline)
 
-    # Use native status boxes so the content will never be rendered as raw <div> text.
-    summary = f"今日建議：{action_label}｜建議張數：{suggested_lots} 張｜建議掛單價：{suggested_bid_text}｜是否追價：{chase_today}"
-    if action_label in ("積極加碼", "分批加碼", "可加碼", "可分批加碼"):
-        st.success(summary)
-    elif action_label in ("觀察", "試單", "小量試單", "持有觀察"):
-        st.warning(summary)
+    cols = st.columns(4)
+    cols[0].metric("今日建議", short_label)
+    cols[1].metric("建議張數", f"{suggested_lots} 張")
+    cols[2].metric("建議價格", suggested_price_text)
+    cols[3].metric("是否追價", str(chase_today))
+
+    st.subheader("今日操作")
+    if suggested_lots <= 0:
+        st.error(f"不要掛單。{next_action}")
+    elif tone == "green":
+        st.success(next_action)
     else:
-        st.error(summary)
+        st.warning(next_action)
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("今日建議", action_label)
-    col2.metric("建議張數", f"{suggested_lots} 張")
-    col3.metric("建議掛單價", suggested_bid_text)
-    col4.metric("是否追價", chase_today)
+    st.subheader("關鍵原因")
+    reasons = list(getattr(decision, "primary_reasons", []) or [])[:3]
+    if not reasons:
+        reasons = ["目前訊號尚未完全確認，先以價格與部位風控為主。"]
+    for idx, reason in enumerate(reasons, 1):
+        st.write(f"{idx}. {reason}")
 
-    st.markdown("**主要原因**")
-    for reason in primary_reasons:
-        st.write(f"- {reason}")
+    with st.expander("買入後試算", expanded=False):
+        after_avg = getattr(decision, "after_buy_average_cost", None)
+        after_cash = getattr(decision, "after_buy_remaining_cash", None)
+        after_ratio = getattr(decision, "after_buy_stock_ratio", None)
+        over_limit = bool(getattr(decision, "over_position_limit_after_buy", False))
+        if suggested_lots <= 0:
+            st.write(f"未加碼，平均成本維持：{format_price(after_avg)}")
+            st.write(f"未加碼，剩餘現金維持：{format_price(after_cash)}")
+            st.write(f"未加碼，股票比例維持：{format_ratio(after_ratio)}")
+        else:
+            st.write(f"買完後平均成本：{format_price(after_avg)}")
+            st.write(f"買完後剩餘現金：{format_price(after_cash)}")
+            st.write(f"買完後股票比例：{format_ratio(after_ratio)}")
+        st.write(f"是否超過持倉上限：{'是' if over_limit else '否'}")
+        st.write(f"進場機率：{entry_probability}/100")
+        st.write(f"風險：{risk_label}")
 
-    st.markdown("**下一步操作**")
-    st.write(next_action)
-
-    detail_cols = st.columns(2)
-    with detail_cols[0]:
-        st.write(avg_cost_text)
-        st.write(cash_text)
-    with detail_cols[1]:
-        st.write(ratio_text)
-        st.write(f"是否超過持倉上限：{over_limit}")
 
 def render_score_cards(module_scores: dict[str, int], total_score: int) -> None:
     st.subheader("五大模組分數")
@@ -278,42 +569,22 @@ def render_score_cards(module_scores: dict[str, int], total_score: int) -> None:
 
 
 def render_risk_detail(decision) -> None:
-    risk_width = max(0, min(100, int(getattr(decision, "risk_score", 0) or 0)))
+    risk_score = int(getattr(decision, "risk_score", 0) or 0)
     st.subheader("進場機率與風險")
     cols = st.columns(3)
-    with cols[0]:
-        st.metric("AI總分", f"{getattr(decision, 'total_score', 0)}/100")
-    with cols[1]:
-        st.metric("進場機率", f"{getattr(decision, 'entry_probability', 0)}/100", getattr(decision, "entry_probability_text", ""))
-    with cols[2]:
-        st.metric("部位模式", getattr(decision, "position_mode_label", ""))
-    st.markdown(
-        f"""
-        <div style="margin:8px 0 18px;">
-            <div style="display:flex;justify-content:space-between;color:#e5e7eb;">
-                <span>風險條：{getattr(decision, "risk_bar_label", "風險")}</span>
-                <span>{getattr(decision, "risk_score", 0)}/100</span>
-            </div>
-            <div style="height:10px;background:rgba(255,255,255,.25);border-radius:999px;overflow:hidden;margin-top:6px;">
-                <div style="height:10px;width:{risk_width}%;background:#ef4444;border-radius:999px;"></div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    cols[0].metric("AI總分", f"{getattr(decision, 'total_score', 0)}/100")
+    cols[1].metric("進場機率", f"{getattr(decision, 'entry_probability', 0)}/100", getattr(decision, "entry_probability_text", ""))
+    cols[2].metric("部位模式", getattr(decision, "position_mode_label", ""))
+    st.progress(max(0, min(100, risk_score)) / 100, text=f"風險條：{getattr(decision, 'risk_bar_label', '')} {risk_score}/100")
 
 
 def render_volume_card(volume: dict[str, object]) -> None:
     st.subheader("成交量判讀")
     cols = st.columns(3)
-    with cols[0]:
-        st.metric("量能訊號", str(volume.get("volume_signal", "量能資料不足")))
-    with cols[1]:
-        ratio = volume.get("volume_ratio")
-        st.metric("最新量 / 20日均量", "無資料" if ratio is None else f"{float(ratio):.2f}x")
-    with cols[2]:
-        avg20 = volume.get("avg20_volume")
-        st.metric("20日平均成交量", "無資料" if avg20 is None else f"{float(avg20):,.0f}")
+    cols[0].metric("量能訊號", str(volume.get("volume_signal", "量能資料不足")))
+    ratio = volume.get("volume_ratio")
+    cols[1].metric("最新量 / 20日均量", "無資料" if ratio is None else f"{float(ratio):.2f}x")
+    cols[2].metric("20日平均成交量", "無資料" if volume.get("avg20_volume") is None else f"{float(volume['avg20_volume']):,.0f}")
 
 
 def render_market_factor_card(market: dict[str, object]) -> None:
@@ -321,27 +592,25 @@ def render_market_factor_card(market: dict[str, object]) -> None:
     if market.get("missing"):
         st.caption("部分背景市場資料暫時無法取得，已略過該因子。")
     summary = market.get("summary", {})
-    cols = st.columns(5)
+    if not isinstance(summary, dict) or not summary:
+        st.caption("市場背景資料不足。")
+        return
+    cols = st.columns(min(5, len(summary)))
     for col, (name, value) in zip(cols, summary.items()):
-        with col:
-            st.metric(name, str(value))
+        col.metric(name, str(value))
 
 
 def render_portfolio_table(portfolio: dict[str, object]) -> None:
     st.subheader("持倉試算表")
     cols = st.columns(4)
-    with cols[0]:
-        st.metric("目前持倉市值", format_price(float(portfolio.get("market_value", 0.0) or 0.0)))
-    with cols[1]:
-        st.metric(
-            "未實現損益",
-            format_price(float(portfolio.get("unrealized_pnl", 0.0) or 0.0)),
-            format_pct(float(portfolio.get("unrealized_pnl_pct", 0.0) or 0.0)),
-        )
-    with cols[2]:
-        st.metric("目前股票資產比例", format_ratio(float(portfolio.get("current_stock_ratio", 0.0) or 0.0)))
-    with cols[3]:
-        st.metric("最大可買張數", f"{int(portfolio.get('max_buy_lots', 0) or 0)} 張")
+    cols[0].metric("目前持倉市值", format_price(float(portfolio.get("market_value", 0.0) or 0.0)))
+    cols[1].metric(
+        "未實現損益",
+        format_price(float(portfolio.get("unrealized_pnl", 0.0) or 0.0)),
+        format_pct(float(portfolio.get("unrealized_pnl_pct", 0.0) or 0.0)),
+    )
+    cols[2].metric("目前股票資產比例", format_ratio(float(portfolio.get("current_stock_ratio", 0.0) or 0.0)))
+    cols[3].metric("最大可買張數", f"{int(portfolio.get('max_buy_lots', 0) or 0)} 張")
 
     table = portfolio.get("scenario_table", pd.DataFrame())
     if isinstance(table, pd.DataFrame) and not table.empty:
@@ -358,19 +627,21 @@ def render_price_trend_chart(data: pd.DataFrame, title: str) -> None:
     if data is None or data.empty or "Close" not in data:
         st.warning("價格資料不足，暫時不顯示價格趨勢圖。")
         return
-
-    close = pd.to_numeric(data["Close"], errors="coerce").dropna()
+    close = data["Close"]
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+    close = pd.to_numeric(close, errors="coerce").dropna()
     if close.empty:
         st.warning("價格資料不足，暫時不顯示價格趨勢圖。")
         return
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=close.index, y=close, mode="lines", name="收盤價", line={"width": 2.5}))
-    fig.add_trace(go.Scatter(x=close.index, y=moving_average(close, 20), mode="lines", name="MA20", line={"width": 1.5}))
-    fig.add_trace(go.Scatter(x=close.index, y=moving_average(close, 60), mode="lines", name="MA60", line={"width": 1.5}))
+    fig.add_trace(go.Scatter(x=close.index, y=close, mode="lines", name="收盤價", line={"color": "#60a5fa", "width": 2.5}))
+    fig.add_trace(go.Scatter(x=close.index, y=moving_average(close, 20), mode="lines", name="MA20", line={"color": "#f59e0b", "width": 1.5}))
+    fig.add_trace(go.Scatter(x=close.index, y=moving_average(close, 60), mode="lines", name="MA60", line={"color": "#10b981", "width": 1.5}))
     fig.update_layout(
         title=title,
-        height=380,
+        height=360,
         margin={"l": 20, "r": 20, "t": 45, "b": 20},
         hovermode="x unified",
         template="plotly_dark",

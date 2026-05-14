@@ -21,6 +21,8 @@ def calculate_portfolio(
     unrealized_pnl_pct = unrealized_pnl / cost_value * 100 if cost_value else 0.0
     total_assets = market_value + max(0.0, cash)
     current_stock_ratio = market_value / total_assets * 100 if total_assets else 0.0
+    max_position_value = total_assets * max_stock_ratio / 100 if max_stock_ratio > 0 else 0.0
+    position_room_amount = max(0.0, max_position_value - market_value) if max_stock_ratio > 0 else max(0.0, cash)
 
     lot_cost = current_price * LOT_SIZE
     max_by_cash = int(cash // lot_cost) if lot_cost > 0 else 0
@@ -69,11 +71,14 @@ def calculate_portfolio(
 
     return {
         "holding_lots": holding_lots,
+        "shares": shares,
         "average_cost": average_cost,
         "cash": cash,
+        "available_cash": cash,
         "current_price": current_price,
         "max_single_investment": max_single_investment,
         "max_stock_ratio": max_stock_ratio,
+        "cost_value": cost_value,
         "market_value": market_value,
         "total_assets": total_assets,
         "unrealized_pnl": unrealized_pnl,
@@ -82,6 +87,7 @@ def calculate_portfolio(
         "over_target_ratio": over_target_ratio,
         "near_target_ratio": near_target_ratio,
         "excess_stock_ratio": excess_stock_ratio,
+        "position_room_amount": position_room_amount,
         "price_vs_cost_pct": price_vs_cost_pct,
         "price_above_cost_10pct": price_vs_cost_pct >= 10,
         "price_below_cost": average_cost > 0 and current_price < average_cost,
