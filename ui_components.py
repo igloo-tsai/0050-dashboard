@@ -10,29 +10,55 @@ from technical_analysis import moving_average
 
 def format_price(value: float | None) -> str:
     if value is None:
-        return "無資料"
+        return "-"
     try:
         return f"NT${float(value):,.2f}"
     except Exception:
-        return "無資料"
+        return "-"
 
 
 def format_pct(value: float | None) -> str:
     if value is None:
-        return "無資料"
+        return "-"
     try:
         return f"{float(value):+.2f}%"
     except Exception:
-        return "無資料"
+        return "-"
 
 
 def format_ratio(value: float | None) -> str:
     if value is None:
-        return "無資料"
+        return "-"
     try:
         return f"{float(value):.2f}%"
     except Exception:
-        return "無資料"
+        return "-"
+
+
+def render_stock_candidate_selector(candidates: pd.DataFrame, key: str) -> dict[str, str] | None:
+    if candidates is None or candidates.empty:
+        st.warning("找不到股票，請改用股票代碼、中文名稱或部分關鍵字搜尋。")
+        return None
+
+    options = ["請選擇股票"]
+    rows: dict[str, dict[str, str]] = {}
+    for _, row in candidates.iterrows():
+        ticker_code = str(row.get("ticker_code", "") or "")
+        stock_name = str(row.get("stock_name", "") or "")
+        market = str(row.get("market", "") or "")
+        label = f"{ticker_code}｜{stock_name}｜{market}"
+        options.append(label)
+        rows[label] = {
+            "ticker_code": ticker_code,
+            "stock_name": stock_name,
+            "market": market,
+        }
+
+    selected = st.selectbox("搜尋結果候選清單", options=options, key=key)
+    if selected == "請選擇股票":
+        st.info("請先從候選清單選定股票，再進行 AI 分析。")
+        return None
+    return rows.get(selected)
 
 
 def inject_mobile_css() -> None:
@@ -213,20 +239,20 @@ def render_buy_impact(decision) -> None:
     trade_plan = list(getattr(decision, "trade_plan", []) or [])
     if trade_plan:
         last_row = trade_plan[-1]
-        total_amount = float(last_row.get("cumulative_amount", 0.0) or 0.0)
+        total_amount = last_row.get("cumulative_amount")
         total_lots = int(last_row.get("cumulative_lots", 0) or 0)
         total_shares = int(last_row.get("cumulative_shares", 0) or 0)
-        average_cost = float(last_row.get("after_batch_average_cost", 0.0) or 0.0)
-        remaining_cash = float(last_row.get("after_batch_cash", 0.0) or 0.0)
-        stock_ratio = float(last_row.get("after_batch_stock_ratio", 0.0) or 0.0)
+        average_cost = last_row.get("after_batch_average_cost")
+        remaining_cash = last_row.get("after_batch_cash")
+        stock_ratio = last_row.get("after_batch_stock_ratio")
         over_limit = bool(last_row.get("over_limit_after_batch", False))
     else:
-        total_amount = 0.0
+        total_amount = None
         total_lots = 0
         total_shares = 0
-        average_cost = getattr(decision, "after_buy_average_cost", None) or 0.0
-        remaining_cash = getattr(decision, "after_buy_remaining_cash", None) or 0.0
-        stock_ratio = getattr(decision, "after_buy_stock_ratio", None) or 0.0
+        average_cost = getattr(decision, "after_buy_average_cost", None)
+        remaining_cash = getattr(decision, "after_buy_remaining_cash", None)
+        stock_ratio = getattr(decision, "after_buy_stock_ratio", None)
         over_limit = bool(getattr(decision, "over_position_limit_after_buy", False))
 
     cols = st.columns(3)
@@ -234,18 +260,17 @@ def render_buy_impact(decision) -> None:
     cols[1].metric("合計買入", f"{total_lots} 張 {total_shares} 股")
     cols[2].metric("是否超過上限", "是" if over_limit else "否")
     cols = st.columns(3)
-    cols[0].metric("最終平均成本", format_price(float(average_cost or 0.0)))
-    cols[1].metric("最終剩餘現金", format_price(float(remaining_cash or 0.0)))
-    cols[2].metric("最終股票比例", format_ratio(float(stock_ratio or 0.0)))
-
+    cols[0].metric("最終平均成本", format_price(average_cost))
+    cols[1].metric("最終剩餘現金", format_price(remaining_cash))
+    cols[2].metric("最終股票比例", format_ratio(stock_ratio))
 
 def render_system_validation(validation_result: dict[str, object]) -> None:
-    st.subheader("???????")
+    st.subheader("系統穩定性檢查")
     errors = list(validation_result.get("errors", []) or [])
     warnings = list(validation_result.get("warnings", []) or [])
     fixed = list(validation_result.get("fixed", []) or [])
     if not errors and not warnings:
-        st.success("? ??????")
+        st.success("✅ 系統檢查通過")
     elif errors:
         st.error(f"? ?? {len(errors)} ???")
     else:
@@ -256,9 +281,42 @@ def render_system_validation(validation_result: dict[str, object]) -> None:
     for warning in warnings:
         st.write(f"- {warning}")
     if fixed:
-        st.info("??????")
+        st.info("已自動修正：")
         for item in fixed:
             st.write(f"- {item}")
+
+
+def render_valuation_quality_card(result: dict[str, object] | None) -> None:
+    st.subheader("估值與標的品質")
+    if not result:
+        st.info("估值與標的品質資料不足，暫以中性分數處理。")
+        return
+
+    cols = st.columns(4)
+    cols[0].metric("估值分數", f"{int(result.get('valuation_score', 50) or 50)}/100")
+    cols[1].metric("品質分數", f"{int(result.get('quality_score', 50) or 50)}/100")
+    cols[2].metric("綜合分數", f"{int(result.get('final_score', 50) or 50)}/100")
+    cols[3].metric("資料可信度", f"{int(result.get('data_quality_score', 0) or 0)}/100")
+
+    cols = st.columns(3)
+    cols[0].metric("估值判斷", str(result.get("valuation_label", "資料不足") or "資料不足"))
+    cols[1].metric("品質判斷", str(result.get("quality_label", "資料不足") or "資料不足"))
+    cols[2].metric("投資屬性", str(result.get("investability_label", "資料不足") or "資料不足"))
+
+    reasons = [str(item) for item in list(result.get("reasons", []) or [])[:5]]
+    if reasons:
+        st.caption("主要原因")
+        for reason in reasons:
+            st.write(f"- {reason}")
+
+    missing_fields = [str(item) for item in list(result.get("missing_fields", []) or [])]
+    if missing_fields:
+        st.caption("缺失資料欄位")
+        st.write("、".join(missing_fields[:12]))
+
+    for warning in list(result.get("warnings", []) or [])[:5]:
+        st.warning(str(warning))
+
 
 def render_today_action(decision) -> None:
     next_action = getattr(decision, "next_action", "先觀察，不追價。") or "先觀察，不追價。"
@@ -376,6 +434,87 @@ def render_inventory_records(records: list[dict[str, object]], current_price: fl
         st.dataframe(styled, hide_index=True, use_container_width=True)
     else:
         st.dataframe(display, hide_index=True, use_container_width=True)
+
+
+def render_broker_grade_profit_section(summary: dict[str, object]) -> None:
+    st.subheader("券商級損益")
+    if not summary:
+        st.info("尚無損益資料。")
+        return
+
+    cols = st.columns(5)
+    cols[0].metric("總股數", f"{int(summary.get('total_shares', 0) or 0):,} 股")
+    cols[1].metric("平均成本", format_price(float(summary.get("average_cost", 0.0) or 0.0)))
+    cols[2].metric("目前市值", format_price(float(summary.get("market_value", 0.0) or 0.0)))
+    cols[3].metric("未實現損益", format_price(float(summary.get("unrealized_pnl", 0.0) or 0.0)))
+    cols[4].metric("未實現報酬率", format_pct(float(summary.get("unrealized_pnl_pct", 0.0) or 0.0)))
+
+    cols = st.columns(5)
+    cols[0].metric("已實現損益", format_price(float(summary.get("realized_pnl", 0.0) or 0.0)))
+    cols[1].metric("股利收入", format_price(float(summary.get("dividend_income", 0.0) or 0.0)))
+    cols[2].metric("總報酬", format_price(float(summary.get("total_return", 0.0) or 0.0)))
+    cols[3].metric("手續費累計", format_price(float(summary.get("total_fees", 0.0) or 0.0)))
+    cols[4].metric("稅金累計", format_price(float(summary.get("total_tax", 0.0) or 0.0)))
+
+    for warning in list(summary.get("broker_summary", {}).get("warnings", []) or []):
+        st.warning(str(warning))
+    for error in list(summary.get("broker_summary", {}).get("errors", []) or []):
+        st.error(str(error))
+
+
+def render_open_lots_table(open_lots: list[dict[str, object]]) -> None:
+    st.subheader("逐筆庫存損益")
+    if not open_lots:
+        st.info("目前沒有未平倉庫存。")
+        return
+    rows = []
+    for lot in open_lots:
+        rows.append(
+            {
+                "買進日": lot.get("buy_date"),
+                "成交價": round(float(lot.get("buy_price", 0.0) or 0.0), 2),
+                "剩餘股數": int(lot.get("shares_remaining", 0) or 0),
+                "成本": round(float(lot.get("remaining_cost_basis", 0.0) or 0.0), 0),
+                "現值": round(float(lot.get("market_value", 0.0) or 0.0), 0),
+                "未實現損益": round(float(lot.get("unrealized_pnl", 0.0) or 0.0), 0),
+                "報酬率": round(float(lot.get("unrealized_pnl_pct", 0.0) or 0.0), 2),
+            }
+        )
+    display = pd.DataFrame(rows)
+    styled = display.style.map(
+        lambda value: "color: #22c55e" if float(value or 0) >= 0 else "color: #ef4444",
+        subset=["未實現損益", "報酬率"],
+    )
+    st.dataframe(styled, hide_index=True, use_container_width=True)
+
+
+def render_realized_pnl_table(realized_details: list[dict[str, object]]) -> None:
+    st.subheader("已實現損益")
+    if not realized_details:
+        st.info("目前沒有已實現損益。")
+        return
+    rows = []
+    for detail in realized_details:
+        rows.append(
+            {
+                "賣出日": detail.get("sell_date"),
+                "買入日": detail.get("matched_buy_date"),
+                "賣價": round(float(detail.get("sell_price", 0.0) or 0.0), 2),
+                "買價": round(float(detail.get("matched_buy_price", 0.0) or 0.0), 2),
+                "股數": int(detail.get("matched_shares", 0) or 0),
+                "成本": round(float(detail.get("cost_basis", 0.0) or 0.0), 0),
+                "賣出收入": round(float(detail.get("sell_proceeds_allocated", 0.0) or 0.0), 0),
+                "已實現損益": round(float(detail.get("realized_pnl", 0.0) or 0.0), 0),
+                "報酬率": round(float(detail.get("realized_pnl_pct", 0.0) or 0.0), 2),
+                "持有天數": int(detail.get("holding_days", 0) or 0),
+            }
+        )
+    display = pd.DataFrame(rows)
+    styled = display.style.map(
+        lambda value: "color: #22c55e" if float(value or 0) >= 0 else "color: #ef4444",
+        subset=["已實現損益", "報酬率"],
+    )
+    st.dataframe(styled, hide_index=True, use_container_width=True)
 
 
 def render_transaction_performance(records: list[dict[str, object]]) -> None:
@@ -653,8 +792,8 @@ def render_volume_card(volume: dict[str, object]) -> None:
     cols = st.columns(3)
     cols[0].metric("量能訊號", str(volume.get("volume_signal", "量能資料不足")))
     ratio = volume.get("volume_ratio")
-    cols[1].metric("最新量 / 20日均量", "無資料" if ratio is None else f"{float(ratio):.2f}x")
-    cols[2].metric("20日平均成交量", "無資料" if volume.get("avg20_volume") is None else f"{float(volume['avg20_volume']):,.0f}")
+    cols[1].metric("最新量 / 20日均量", "-" if ratio is None else f"{float(ratio):.2f}x")
+    cols[2].metric("20日平均成交量", "-" if volume.get("avg20_volume") is None else f"{float(volume['avg20_volume']):,.0f}")
 
 
 def render_market_factor_card(market: dict[str, object]) -> None:

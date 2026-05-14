@@ -8,6 +8,7 @@ import streamlit as st
 from data_service import fetch_taiwan_stock
 from decision_engine import make_decision
 from market_factors import get_market_background
+from price_engine import resolve_decision_price
 from portfolio_engine import calculate_portfolio
 from storage import (
     FEE_RATE,
@@ -21,11 +22,13 @@ from storage import (
     save_trade_log,
     summarize_inventory_by_ticker,
 )
+from stock_master import load_stock_master, search_stocks
 from technical_analysis import build_technical_snapshot
 from ui_components import (
     format_pct,
     format_price,
     inject_mobile_css,
+    render_broker_grade_profit_section,
     render_holding_pnl_card,
     render_inventory_records,
     render_key_reasons,
@@ -33,51 +36,24 @@ from ui_components import (
     render_position_summary_card,
     render_portfolio_table,
     render_price_trend_chart,
+    render_open_lots_table,
+    render_realized_pnl_table,
     render_risk_detail,
     render_score_cards,
     render_self_check,
+    render_stock_candidate_selector,
     render_system_validation,
     render_trader_decision_card,
     render_trade_record_summary,
     render_trade_log_performance,
     render_trade_log_records,
     render_transaction_performance,
+    render_valuation_quality_card,
     render_volume_card,
 )
 from validator import run_system_validation
+from valuation_quality_engine import evaluate_valuation_quality
 from volume_analysis import analyze_volume
-
-
-TAIWAN_STOCK_ALIASES = {
-    "0050": "0050.TW",
-    "元大台灣50": "0050.TW",
-    "2330": "2330.TW",
-    "台積電": "2330.TW",
-    "2317": "2317.TW",
-    "鴻海": "2317.TW",
-    "2301": "2301.TW",
-    "光寶科": "2301.TW",
-    "3037": "3037.TW",
-    "欣興": "3037.TW",
-    "2454": "2454.TW",
-    "聯發科": "2454.TW",
-    "2382": "2382.TW",
-    "廣達": "2382.TW",
-    "3231": "3231.TW",
-    "緯創": "3231.TW",
-}
-
-
-def convert_to_ticker(query: str) -> tuple[str, str | None]:
-    text = query.strip()
-    if not text:
-        return "", None
-    if text in TAIWAN_STOCK_ALIASES:
-        return text, TAIWAN_STOCK_ALIASES[text]
-    normalized = text.upper().replace(".TW", "")
-    if normalized.isdigit() and len(normalized) == 4:
-        return normalized, f"{normalized}.TW"
-    return text, None
 
 
 def display_name(label: str, ticker: str) -> str:
@@ -405,7 +381,13 @@ def run_analysis_page(label: str, ticker: str, prefix: str, start: date, end: da
 
     latest_close = float(data["Close"].dropna().iloc[-1])
     inputs = render_inputs(prefix, latest_close, use_inventory_position=use_inventory_position)
-    current_price = float(inputs["intraday_price"] or latest_close)
+    price_resolution = resolve_decision_price(
+        latest_close=latest_close,
+        manual_price=float(inputs.get("intraday_price") or 0.0),
+        use_manual_price=False,
+    )
+    current_price = float(price_resolution.decision_price or latest_close)
+    inputs["price_source"] = price_resolution.price_label
     analysis_data = apply_intraday_price(data, current_price)
 
     tech = build_technical_snapshot(analysis_data)
@@ -418,6 +400,7 @@ def run_analysis_page(label: str, ticker: str, prefix: str, start: date, end: da
 
     volume = analyze_volume(analysis_data, inputs["manual_volume"])
     market = get_market_background(start, end)
+    valuation_quality_result = evaluate_valuation_quality(resolved_ticker, analysis_data, market)
     portfolio = calculate_portfolio(
         holding_lots=float(inputs["holding_lots"] or 0),
         average_cost=float(inputs["average_cost"] or 0),
@@ -437,6 +420,7 @@ def run_analysis_page(label: str, ticker: str, prefix: str, start: date, end: da
         max_position_ratio=float(inputs["max_ratio"] or 0),
         ticker=resolved_ticker,
         latest_close=latest_close,
+        valuation_quality_result=valuation_quality_result,
     )
 
     st.caption(f"分析標的：{display_name(label, resolved_ticker)}｜最新收盤價：{format_price(latest_close)}｜盤中價格：{format_price(current_price)}")
@@ -446,6 +430,7 @@ def run_analysis_page(label: str, ticker: str, prefix: str, start: date, end: da
     if latest_close > 0 and abs(current_price - latest_close) / latest_close >= 0.10:
         st.warning("手動價格與最新收盤價差異較大，請確認是否為即時盤中價格。")
     render_trader_decision_card(decision)
+    render_valuation_quality_card(valuation_quality_result)
     render_holding_pnl_card(portfolio)
     render_trade_log_section(prefix, decision, portfolio, current_price)
     render_position_summary_card(portfolio)
@@ -613,28 +598,63 @@ def render_target_inventory_manager(ticker: str, name: str, prefix: str, current
     return get_inventory_by_ticker(list(st.session_state.get("inventory_records", [])), ticker)
 
 
-def get_target_params(prefix: str, latest_close: float) -> dict[str, float | str | None]:
-    current_price = float(st.session_state.get(f"{prefix}_target_current_price", latest_close) or latest_close or 0.0)
+def get_target_params(prefix: str, latest_close: float) -> dict[str, object]:
+    use_manual_price = bool(st.session_state.get(f"{prefix}_use_manual_price", False))
+    manual_text = str(st.session_state.get(f"{prefix}_target_manual_price_text", "") or "").strip()
+    manual_price = None
+    manual_input_error = ""
+    if manual_text:
+        try:
+            manual_price = float(manual_text)
+        except ValueError:
+            manual_input_error = "手動盤中價格格式錯誤，已忽略。"
+    confirm_extreme_price = bool(st.session_state.get(f"{prefix}_confirm_extreme_price", False))
+    price_resolution = resolve_decision_price(
+        latest_close=latest_close,
+        manual_price=manual_price,
+        use_manual_price=use_manual_price,
+        confirm_extreme_price=confirm_extreme_price,
+    )
     cash = float(st.session_state.get(f"{prefix}_target_cash", 100_000.0) or 0.0)
     manual_volume_raw = float(st.session_state.get(f"{prefix}_target_manual_volume", 0.0) or 0.0)
     today_budget = float(st.session_state.get(f"{prefix}_target_today_budget", 100_000.0) or 0.0)
     max_ratio = float(st.session_state.get(f"{prefix}_target_max_ratio", 70.0) or 0.0)
-    price_source = "使用者手動輸入" if abs(current_price - float(latest_close or 0.0)) > 0.001 else "最新收盤價"
     return {
         "cash": cash,
-        "current_price": current_price,
+        "current_price": price_resolution.decision_price,
+        "manual_price": manual_price,
+        "use_manual_price": use_manual_price,
+        "confirm_extreme_price": confirm_extreme_price,
         "manual_volume": manual_volume_raw if manual_volume_raw > 0 else None,
         "today_budget": today_budget,
         "max_ratio": max_ratio,
-        "price_source": price_source,
+        "price_source": price_resolution.price_source,
+        "price_label": price_resolution.price_label,
+        "price_warnings": ([manual_input_error] if manual_input_error else []) + price_resolution.warnings,
+        "price_errors": price_resolution.errors,
+        "manual_override": price_resolution.manual_override,
     }
-
 
 def render_target_inputs(prefix: str, latest_close: float) -> dict[str, float | None]:
     with st.expander("⚙️ 投資參數", expanded=False):
         cols = st.columns(2)
         with cols[0]:
-            st.number_input("目前市價", min_value=0.0, value=float(st.session_state.get(f"{prefix}_target_current_price", latest_close) or latest_close), step=0.05, key=f"{prefix}_target_current_price")
+            use_manual_price = st.toggle("使用盤中手動價格", value=bool(st.session_state.get(f"{prefix}_use_manual_price", False)), key=f"{prefix}_use_manual_price")
+            manual_price_text = st.text_input(
+                "盤中手動價格",
+                value=str(st.session_state.get(f"{prefix}_target_manual_price_text", "") or ""),
+                placeholder="選填；例如 95.50",
+                key=f"{prefix}_target_manual_price_text",
+            )
+            st.caption("未開啟手動價格時，AI 決策使用最新收盤價。")
+            try:
+                manual_price_for_check = float(manual_price_text) if str(manual_price_text).strip() else 0.0
+            except ValueError:
+                manual_price_for_check = 0.0
+            if use_manual_price and latest_close > 0 and manual_price_for_check > 0 and abs(float(manual_price_for_check) - float(latest_close)) / float(latest_close) > 0.20:
+                st.checkbox("我確認此盤中價格來源正確", value=bool(st.session_state.get(f"{prefix}_confirm_extreme_price", False)), key=f"{prefix}_confirm_extreme_price")
+            else:
+                st.session_state[f"{prefix}_confirm_extreme_price"] = False
             cash = st.number_input("可投入現金", min_value=0.0, value=100_000.0, step=10_000.0, key=f"{prefix}_target_cash")
         with cols[1]:
             manual_volume = st.number_input("今日成交量，可選填", min_value=0.0, value=0.0, step=1000.0, key=f"{prefix}_target_manual_volume")
@@ -643,12 +663,12 @@ def render_target_inputs(prefix: str, latest_close: float) -> dict[str, float | 
         st.caption("調整後頁面會依新參數重新計算。")
     return {
         "cash": cash,
-        "current_price": float(st.session_state.get(f"{prefix}_target_current_price", latest_close) or latest_close or 0.0),
+        "manual_price": float(manual_price_for_check or 0.0),
+        "use_manual_price": bool(use_manual_price),
         "manual_volume": manual_volume if manual_volume > 0 else None,
         "today_budget": today_budget,
         "max_ratio": float(max_ratio),
     }
-
 
 def render_inventory_summary(summary: dict[str, object]) -> None:
     st.subheader("📊 持倉績效")
@@ -681,7 +701,7 @@ def render_target_page(label: str, ticker: str, prefix: str, start: date, end: d
         resolved_ticker, data = fetch_taiwan_stock(ticker, start, end)
 
     if data.empty or data["Close"].dropna().empty:
-        st.warning("資料不足，使用簡化模型")
+        st.warning("價格抓取失敗或資料不足，暫時無法進行完整 AI 分析。")
         latest_close = 0.0
     else:
         latest_close = float(data["Close"].dropna().iloc[-1])
@@ -689,9 +709,11 @@ def render_target_page(label: str, ticker: str, prefix: str, start: date, end: d
     st.subheader(display_name(label, resolved_ticker))
     inputs = get_target_params(prefix, latest_close)
     current_price = float(inputs["current_price"] or latest_close or 0.0)
-    st.caption(f"目前決策價格：{format_price(current_price)}｜價格來源：{inputs.get('price_source', '最新收盤價')}")
-    if latest_close > 0 and abs(current_price - latest_close) / latest_close >= 0.10:
-        st.warning("手動價格與最新收盤價差異較大，請確認是否為即時盤中價格。")
+    st.caption(f"決策價格：{format_price(current_price)}｜價格來源：{inputs.get('price_label', '最新收盤價')}")
+    for warning in list(inputs.get("price_warnings", []) or []):
+        st.warning(str(warning))
+    for error in list(inputs.get("price_errors", []) or []):
+        st.error(str(error))
 
     all_records = list(st.session_state.get("inventory_records", []))
     ticker_records = get_inventory_by_ticker(all_records, resolved_ticker)
@@ -699,6 +721,7 @@ def render_target_page(label: str, ticker: str, prefix: str, start: date, end: d
 
     if data.empty:
         render_inventory_summary(summary)
+        render_target_inputs(prefix, latest_close)
         return
     analysis_data = apply_intraday_price(data, current_price)
     tech = build_technical_snapshot(analysis_data)
@@ -736,6 +759,7 @@ def render_target_page(label: str, ticker: str, prefix: str, start: date, end: d
         max_position_ratio=float(inputs["max_ratio"] or 0.0),
         ticker=resolved_ticker,
         latest_close=latest_close,
+        valuation_quality_result=valuation_quality_result,
     )
     validation_result = run_system_validation(
         records=ticker_records,
@@ -748,11 +772,20 @@ def render_target_page(label: str, ticker: str, prefix: str, start: date, end: d
         cash=float(inputs["cash"] or 0.0),
         max_stock_ratio=float(inputs["max_ratio"] or 0.0),
         current_price=current_price,
+        latest_close=latest_close,
+        price_source=str(inputs.get("price_source", "")),
+        manual_override=bool(inputs.get("manual_override", False)),
+        confirm_extreme_price=bool(inputs.get("confirm_extreme_price", False)),
+        price_warnings=list(inputs.get("price_warnings", []) or []),
+        broker_summary=dict(summary.get("broker_summary", {}) or {}),
+        valuation_quality_result=valuation_quality_result,
     )
     system_flags = list(validation_result.get("conflict_flags", []) or [])
 
     render_trader_decision_card(decision)
     render_system_validation(validation_result)
+    render_valuation_quality_card(valuation_quality_result)
+    render_broker_grade_profit_section(summary)
     render_inventory_summary(summary)
     render_target_inputs(prefix, latest_close)
     ticker_records = render_target_inventory_manager(resolved_ticker, label, prefix, current_price)
@@ -768,6 +801,8 @@ def render_target_page(label: str, ticker: str, prefix: str, start: date, end: d
         render_market_factor_card(market)
         render_portfolio_table(portfolio)
         render_transaction_performance(ticker_records)
+        render_open_lots_table(list(summary.get("open_lots", []) or []))
+        render_realized_pnl_table(list(summary.get("realized_details", []) or []))
         st.subheader("價格趨勢")
         render_price_trend_chart(analysis_data, f"{display_name(label, resolved_ticker)} 價格趨勢")
 
@@ -776,7 +811,6 @@ def normalize_inventory_ticker(raw_ticker: str) -> str:
     ticker = str(raw_ticker or "").strip().upper()
     if not ticker:
         return ""
-    ticker = ticker.replace(".TWO", ".TW")
     if ticker.endswith(".TW"):
         return ticker
     if ticker.isdigit() and len(ticker) == 4:
@@ -1004,18 +1038,32 @@ def main() -> None:
 
     with tab_stock:
         st.subheader("台股AI分析")
-        query = st.text_input(
-            "股票代碼或公司名稱",
-            value="2330",
-            placeholder="例如：2330、台積電、2317、鴻海",
-            key="stock_query",
-        )
-        st.caption("支援：0050 / 元大台灣50、2330 / 台積電、2317 / 鴻海、2301 / 光寶科、3037 / 欣興、2454 / 聯發科、2382 / 廣達、3231 / 緯創")
-        label, ticker = convert_to_ticker(query)
-        if ticker is None:
-            st.warning("請輸入台股代碼，例如 2330，或常見公司名稱，例如 台積電。")
+        master_result = load_stock_master()
+        for warning in master_result.warnings:
+            st.warning(warning)
+        if master_result.errors or master_result.data.empty:
+            st.error("目前無法取得股票清單")
+            for error in master_result.errors:
+                st.caption(error)
         else:
-            render_target_page(label, ticker, "stock_ai", start, end)
+            query = st.text_input(
+                "股票代碼或公司名稱",
+                value="",
+                placeholder="可輸入代碼、中文名稱或部分關鍵字，例如 2330、台積、鴻",
+                key="stock_query",
+            )
+            if not query.strip():
+                st.info("請輸入股票代碼、中文名稱或部分關鍵字搜尋。")
+            else:
+                candidates = search_stocks(master_result.data, query)
+                selected_stock = render_stock_candidate_selector(candidates, key="stock_candidate_selector")
+                if selected_stock:
+                    ticker = selected_stock["ticker_code"]
+                    label = selected_stock["stock_name"]
+                    market = selected_stock["market"]
+                    st.caption(f"已選定：{ticker}｜{label}｜{market}")
+                    stock_prefix = f"stock_ai_{ticker.replace('.', '_')}"
+                    render_target_page(label, ticker, stock_prefix, start, end)
 
     with tab_inventory:
         render_all_inventory_page(start, end)

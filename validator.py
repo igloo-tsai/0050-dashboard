@@ -160,7 +160,19 @@ def validate_trade_plan(
 
         after_ratio = _number(row.get("after_batch_stock_ratio"))
         over_limit = bool(row.get("over_limit_after_batch", False))
-        if max_stock_ratio > 0:
+        total_buy_shares = _integer(row.get("total_buy_shares", row.get("cumulative_total_shares")))
+        total_buy_amount = _number(row.get("total_buy_amount", row.get("cumulative_amount")))
+        if total_buy_shares == 0:
+            if abs(_number(row.get("after_batch_average_cost")) - _number(row.get("original_average_cost", row.get("after_batch_average_cost")))) > 0.01:
+                result["warnings"].append(f"第 {index} 批買入 0 股時，成交後平均成本不應改變")
+            if abs(_number(row.get("after_batch_stock_ratio")) - _number(row.get("original_stock_ratio", row.get("after_batch_stock_ratio")))) > 0.01:
+                result["warnings"].append(f"第 {index} 批買入 0 股時，成交後股票比例不應改變")
+            if abs(_number(row.get("after_batch_cash")) - _number(row.get("original_cash", row.get("after_batch_cash")))) > 1:
+                result["warnings"].append(f"第 {index} 批買入 0 股時，成交後現金不應改變")
+            if over_limit:
+                row["over_limit_after_batch"] = False
+                result["fixed"].append(f"第 {index} 批買入 0 股，over_limit_after_batch 已修正為 False")
+        if max_stock_ratio > 0 and total_buy_amount > 0:
             expected_over = after_ratio > max_stock_ratio
             if expected_over != over_limit:
                 row["over_limit_after_batch"] = expected_over
@@ -211,6 +223,125 @@ def validate_decision(decision: Any, portfolio: dict[str, Any]) -> dict[str, Any
     return result
 
 
+def validate_broker_portfolio(broker_summary: dict[str, Any] | None) -> dict[str, Any]:
+    result = _result()
+    if not broker_summary:
+        result["passed"] = True
+        return result
+
+    open_lots = list(broker_summary.get("open_lots", []) or [])
+    realized_details = list(broker_summary.get("realized_details", []) or [])
+    invalid_records = list(broker_summary.get("invalid_records", []) or [])
+
+    if invalid_records:
+        result["errors"].append("存在無效交易紀錄，券商級損益已排除該紀錄")
+    for index, lot in enumerate(open_lots, 1):
+        if _number(lot.get("fee")) < 0:
+            result["errors"].append(f"第 {index} 筆 open lot 手續費不可為負")
+        if _number(lot.get("tax")) < 0:
+            result["errors"].append(f"第 {index} 筆 open lot 稅金不可為負")
+        if _number(lot.get("buy_price")) <= 0:
+            result["errors"].append(f"第 {index} 筆 open lot 買入價格不可小於等於 0")
+        if _integer(lot.get("shares_remaining")) <= 0:
+            result["errors"].append(f"第 {index} 筆 open lot 剩餘股數不可小於等於 0")
+
+    total_shares = sum(_integer(lot.get("shares_remaining")) for lot in open_lots)
+    total_cost_basis = sum(_number(lot.get("remaining_cost_basis")) for lot in open_lots)
+    unrealized_pnl = sum(_number(lot.get("unrealized_pnl")) for lot in open_lots)
+    realized_pnl = sum(_number(detail.get("realized_pnl")) for detail in realized_details)
+
+    if total_shares != _integer(broker_summary.get("total_shares")):
+        result["errors"].append("total_shares 必須等於 open_lots shares_remaining 加總")
+    if abs(total_cost_basis - _number(broker_summary.get("total_cost_basis"))) > 1:
+        result["errors"].append("total_cost_basis 必須等於 open_lots remaining_cost_basis 加總")
+    if abs(unrealized_pnl - _number(broker_summary.get("unrealized_pnl"))) > 1:
+        result["errors"].append("unrealized_pnl 必須等於 open_lots unrealized_pnl 加總")
+    if abs(realized_pnl - _number(broker_summary.get("realized_pnl"))) > 1:
+        result["errors"].append("realized_pnl 必須等於 realized_details 加總")
+
+    for warning in list(broker_summary.get("warnings", []) or []):
+        result["warnings"].append(str(warning))
+    for error in list(broker_summary.get("errors", []) or []):
+        result["errors"].append(str(error))
+
+    result["passed"] = not result["errors"]
+    result["conflict_flags"] = list(result["errors"] + result["warnings"])
+    return result
+
+
+def validate_valuation_quality(result_data: dict[str, Any] | None) -> dict[str, Any]:
+    result = _result()
+    if result_data is None:
+        result["warnings"].append("估值與標的品質資料不存在，decision_engine 應採中性分數")
+        result["passed"] = True
+        result["conflict_flags"] = list(result["warnings"])
+        return result
+
+    for key in ("final_score", "valuation_score", "quality_score", "data_quality_score"):
+        value = result_data.get(key)
+        try:
+            is_missing_score = value is None or value != value
+        except Exception:
+            is_missing_score = True
+        if is_missing_score:
+            result_data[key] = 50
+            result["fixed"].append(f"{key} 為 None，已改為 50")
+            value = 50
+        score = _number(value)
+        if score < 0 or score > 100:
+            result_data[key] = max(0, min(100, score))
+            result["fixed"].append(f"{key} 超出 0~100，已修正")
+
+    for key in ("missing_fields", "reasons", "warnings"):
+        if not isinstance(result_data.get(key), list):
+            result_data[key] = []
+            result["fixed"].append(f"{key} 不是 list，已改為空 list")
+
+    if not bool(result_data.get("is_data_sufficient", False)):
+        result["warnings"].append("估值與標的品質資料不足，decision_engine 不可過度依賴此模組")
+
+    result["passed"] = not result["errors"]
+    result["conflict_flags"] = list(result["errors"] + result["warnings"])
+    return result
+
+
+def validate_price_source(
+    *,
+    decision_price: float,
+    latest_close: float,
+    price_source: str,
+    manual_override: bool,
+    confirm_extreme_price: bool = False,
+    price_warnings: list[str] | None = None,
+) -> dict[str, Any]:
+    result = _result()
+    price = _number(decision_price)
+    close = _number(latest_close)
+    warnings = list(price_warnings or [])
+    source = str(price_source or "")
+
+    if price <= 0:
+        result["errors"].append("決策價格必須大於 0")
+    if source == "invalid_price":
+        result["warnings"].append("目前價格來源標示為 invalid_price，AI 應使用安全 fallback")
+    if manual_override and source != "manual_override" and source != "invalid_price":
+        result["warnings"].append("手動覆寫狀態與 price_source 不一致")
+    if close > 0 and price > 0:
+        diff_pct = abs(price - close) / close * 100
+        if diff_pct > 20 and source == "manual_override" and not confirm_extreme_price:
+            result["errors"].append("決策價格與最近收盤價偏離超過 20%，不得直接進入 AI")
+        elif diff_pct > 20 and source == "manual_override":
+            result["warnings"].append("決策價格與最近收盤價偏離超過 20%，已由使用者確認")
+        elif diff_pct > 10:
+            result["warnings"].append("決策價格與最近收盤價偏離超過 10%")
+    for warning in warnings:
+        result["warnings"].append(str(warning))
+
+    result["passed"] = not result["errors"]
+    result["conflict_flags"] = list(result["errors"] + result["warnings"])
+    return result
+
+
 def run_system_validation(
     *,
     records: list[dict[str, Any]] | None = None,
@@ -223,11 +354,20 @@ def run_system_validation(
     cash: float = 0.0,
     max_stock_ratio: float = 0.0,
     current_price: float | None = None,
+    latest_close: float = 0.0,
+    price_source: str = "",
+    manual_override: bool = False,
+    confirm_extreme_price: bool = False,
+    price_warnings: list[str] | None = None,
+    broker_summary: dict[str, Any] | None = None,
+    valuation_quality_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = _result()
     _merge(result, validate_inventory(records or [], ticker))
     if portfolio is not None:
         _merge(result, validate_portfolio(portfolio))
+    _merge(result, validate_broker_portfolio(broker_summary))
+    _merge(result, validate_valuation_quality(valuation_quality_result))
     if decision is not None:
         _merge(result, validate_decision(decision, portfolio or {}))
     _merge(
@@ -239,6 +379,17 @@ def run_system_validation(
             cash=cash,
             max_stock_ratio=max_stock_ratio,
             current_price=current_price,
+        ),
+    )
+    _merge(
+        result,
+        validate_price_source(
+            decision_price=_number(current_price),
+            latest_close=latest_close,
+            price_source=price_source,
+            manual_override=manual_override,
+            confirm_extreme_price=confirm_extreme_price,
+            price_warnings=price_warnings,
         ),
     )
     result["passed"] = not result["errors"]

@@ -48,6 +48,7 @@ class DecisionResult:
     primary_reasons: list[str]
     reasons: list[str]
     module_scores: dict[str, int]
+    valuation_quality_result: dict[str, object] | None = None
 
 
 def clamp_score(value: float) -> int:
@@ -208,6 +209,13 @@ def action_from_mode(position_mode: str) -> str:
     }.get(position_mode, "觀察")
 
 
+def downgrade_position_mode(position_mode: str) -> str:
+    order = ["AVOID", "HOLD", "PROBE", "SCALE_IN", "AGGRESSIVE"]
+    if position_mode not in order:
+        return "HOLD"
+    return order[max(0, order.index(position_mode) - 1)]
+
+
 def build_next_action(
     today_status: str,
     action_label: str,
@@ -241,6 +249,7 @@ def build_trade_plan(
     base_cost_value: float,
     cash: float,
     max_position_ratio: float,
+    original_price: float | None = None,
 ) -> list[dict[str, object]]:
     plan: list[dict[str, object]] = []
     batch_ratios = {
@@ -283,18 +292,41 @@ def build_trade_plan(
         cumulative_total_shares += lots * 1000 + shares
         cumulative_lots = cumulative_total_shares // 1000
         cumulative_shares = cumulative_total_shares % 1000
-        after_batch_total_shares = int(base_shares + cumulative_total_shares)
-        after_batch_lots = after_batch_total_shares // 1000
-        after_batch_odd_shares = after_batch_total_shares % 1000
-        after_batch_total_cost = base_cost_value + cumulative_amount
-        after_batch_average_cost = after_batch_total_cost / after_batch_total_shares if after_batch_total_shares > 0 else 0.0
-        after_batch_market_value = after_batch_total_shares * safe_price
-        after_batch_cash = cash - cumulative_amount
-        after_batch_total_assets = after_batch_market_value + max(0.0, after_batch_cash)
-        after_batch_stock_ratio = after_batch_market_value / after_batch_total_assets * 100 if after_batch_total_assets > 0 else 0.0
-        after_batch_unrealized_pnl = after_batch_market_value - after_batch_total_cost
-        after_batch_unrealized_pnl_pct = after_batch_unrealized_pnl / after_batch_total_cost * 100 if after_batch_total_cost > 0 else 0.0
-        over_limit_after_batch = after_batch_stock_ratio > max_position_ratio if max_position_ratio > 0 else False
+        total_buy_amount = cumulative_amount
+        total_buy_shares = cumulative_total_shares
+
+        original_shares = int(max(0.0, base_shares))
+        original_avg_cost = base_cost_value / original_shares if original_shares > 0 else 0.0
+        original_reference_price = max(0.0, float(original_price if original_price is not None else safe_price))
+        original_market_value = original_shares * original_reference_price
+        original_total_assets = original_market_value + max(0.0, cash)
+        original_stock_ratio = original_market_value / original_total_assets * 100 if original_total_assets > 0 else 0.0
+
+        if total_buy_shares == 0:
+            after_batch_total_shares = original_shares
+            after_batch_lots = after_batch_total_shares // 1000
+            after_batch_odd_shares = after_batch_total_shares % 1000
+            after_batch_total_cost = base_cost_value
+            after_batch_average_cost = original_avg_cost
+            after_batch_market_value = original_market_value
+            after_batch_cash = cash
+            after_batch_stock_ratio = original_stock_ratio
+            after_batch_unrealized_pnl = after_batch_market_value - after_batch_total_cost
+            after_batch_unrealized_pnl_pct = after_batch_unrealized_pnl / after_batch_total_cost * 100 if after_batch_total_cost > 0 else 0.0
+            over_limit_after_batch = False
+        else:
+            after_batch_total_shares = int(base_shares + total_buy_shares)
+            after_batch_lots = after_batch_total_shares // 1000
+            after_batch_odd_shares = after_batch_total_shares % 1000
+            after_batch_total_cost = base_cost_value + total_buy_amount
+            after_batch_average_cost = after_batch_total_cost / after_batch_total_shares if after_batch_total_shares > 0 else 0.0
+            after_batch_market_value = after_batch_total_shares * safe_price
+            after_batch_cash = cash - total_buy_amount
+            after_batch_total_assets = after_batch_market_value + max(0.0, after_batch_cash)
+            after_batch_stock_ratio = after_batch_market_value / after_batch_total_assets * 100 if after_batch_total_assets > 0 else 0.0
+            after_batch_unrealized_pnl = after_batch_market_value - after_batch_total_cost
+            after_batch_unrealized_pnl_pct = after_batch_unrealized_pnl / after_batch_total_cost * 100 if after_batch_total_cost > 0 else 0.0
+            over_limit_after_batch = after_batch_stock_ratio > max_position_ratio if total_buy_amount > 0 and max_position_ratio > 0 else False
 
         plan.append(
             {
@@ -306,6 +338,11 @@ def build_trade_plan(
                 "lots": lots,
                 "shares": shares,
                 "amount": round(amount, 0),
+                "total_buy_amount": round(total_buy_amount, 0),
+                "total_buy_shares": int(total_buy_shares),
+                "original_average_cost": round(original_avg_cost, 2),
+                "original_stock_ratio": round(original_stock_ratio, 2),
+                "original_cash": round(cash, 0),
                 "cumulative_amount": round(cumulative_amount, 0),
                 "cumulative_lots": int(cumulative_lots),
                 "cumulative_shares": int(cumulative_shares),
@@ -423,9 +460,9 @@ def validate_decision_consistency(
     safe_suggested_price = max(0.0, float(suggested_price or 0.0))
     suggested_amount = suggested_buy_lots * safe_suggested_price * 1000 + suggested_buy_shares * safe_suggested_price
     if suggested_amount > today_budget + 1:
-        conflict_flags.append("????????????")
+        conflict_flags.append("建議買進金額超過今日預算")
     if suggested_amount > cash + 1:
-        conflict_flags.append("????????????")
+        conflict_flags.append("建議買進金額超過可用現金")
 
     total_amount = sum(float(row.get("amount", 0.0) or 0.0) for row in trade_plan)
     if total_amount > available_budget + 1:
@@ -444,7 +481,7 @@ def validate_decision_consistency(
             conflict_flags.append("分批策略單批投入超過該批預算")
             row["amount"] = float(row.get("batch_budget", 0.0) or 0.0)
         if bool(row.get("over_limit_after_batch", False)) and float(row.get("amount", 0.0) or 0.0) > 0 and (suggested_buy_lots > 0 or suggested_buy_shares > 0):
-            conflict_flags.append("???????????")
+            conflict_flags.append("建議買進後超過部位上限")
 
 
     if action_label in ("可加碼", "分批加碼", "積極加碼") and suggested_buy_lots == 0 and suggested_buy_shares == 0:
@@ -466,6 +503,7 @@ def make_decision(
     max_position_ratio: float | None = None,
     ticker: str = "",
     latest_close: float | None = None,
+    valuation_quality_result: dict[str, object] | None = None,
 ) -> DecisionResult:
     market_score = int(market.get("score", 50))
     trend_score, trend_reasons = score_trend(tech)
@@ -473,6 +511,16 @@ def make_decision(
     price_score, price_reasons = score_price_position(tech)
     portfolio_score, portfolio_reasons = score_portfolio_risk(portfolio, max_stock_ratio)
     conflict_flags: list[str] = []
+    valuation_quality_result = dict(valuation_quality_result or {})
+    valuation_quality_mode = str(valuation_quality_result.get("mode", "ETF") or "ETF")
+    valuation_quality_sufficient = bool(valuation_quality_result.get("is_data_sufficient", False))
+    valuation_quality_score = int(valuation_quality_result.get("final_score", 50) or 50)
+    valuation_quality_score = clamp_score(valuation_quality_score if valuation_quality_sufficient else 50)
+    valuation_label = str(valuation_quality_result.get("valuation_label", "") or "")
+    quality_score_value = int(valuation_quality_result.get("quality_score", 50) or 50)
+    event_risk_score = 50
+    if not valuation_quality_sufficient:
+        conflict_flags.append("估值與標的品質資料不足，該模組採中性 50 分。")
 
     max_position_ratio = float(max_position_ratio if max_position_ratio is not None else max_stock_ratio)
     current_stock_ratio = float(portfolio.get("current_stock_ratio", 0.0))
@@ -502,13 +550,25 @@ def make_decision(
     print("profit_ratio:", profit_ratio)
     print("current_stock_ratio:", current_stock_ratio)
 
-    total = clamp_score(
-        market_score * 0.20
-        + trend_score * 0.25
-        + volume_score * 0.15
-        + price_score * 0.20
-        + portfolio_score * 0.20
-    )
+    if valuation_quality_mode == "STOCK":
+        total = clamp_score(
+            valuation_quality_score * 0.25
+            + price_score * 0.20
+            + portfolio_score * 0.20
+            + market_score * 0.15
+            + trend_score * 0.10
+            + volume_score * 0.05
+            + event_risk_score * 0.05
+        )
+    else:
+        total = clamp_score(
+            portfolio_score * 0.30
+            + price_score * 0.25
+            + market_score * 0.20
+            + valuation_quality_score * 0.15
+            + trend_score * 0.05
+            + volume_score * 0.05
+        )
 
     max_buy_lots = int(portfolio.get("max_buy_lots", 0))
     rsi = tech.get("rsi")
@@ -564,6 +624,15 @@ def make_decision(
         current_stock_ratio,
         max_stock_ratio,
     )
+    if int(valuation_quality_result.get("final_score", 50) or 50) < 40 and position_mode in ("AGGRESSIVE", "SCALE_IN", "PROBE"):
+        position_mode = "HOLD"
+        position_mode_label = "觀察（估值與品質分數偏低）"
+    if valuation_label == "高估" and position_mode in ("AGGRESSIVE", "SCALE_IN", "PROBE"):
+        position_mode = downgrade_position_mode(position_mode)
+        position_mode_label = f"{position_mode}（估值高估，建議降一級）"
+    if valuation_quality_mode == "STOCK" and quality_score_value < 35 and position_mode in ("AGGRESSIVE", "SCALE_IN"):
+        position_mode = "HOLD"
+        position_mode_label = "觀察（標的品質偏弱，不宜積極）"
     suggested_buy_lots = 0
     primary_reasons: list[str] = []
 
@@ -686,6 +755,7 @@ def make_decision(
         base_cost_value=float(portfolio.get("cost_value", holding_lots * 1000 * average_cost) or 0.0),
         cash=cash,
         max_position_ratio=max_position_ratio,
+        original_price=current_price,
     )
     trader_plan_v2 = build_trader_plan_v2(
         action_label=action_label,
@@ -781,9 +851,15 @@ def make_decision(
         "量能確認分數": volume_score,
         "價格位置分數": price_score,
         "個人持倉風控分數": portfolio_score,
+        "估值與標的品質分數": valuation_quality_score,
     }
+    if valuation_quality_mode == "STOCK":
+        module_scores["事件風險分數"] = event_risk_score
 
     reasons = [f"分析模式：{tech.get('analysis_level', 'minimal')}"]
+    if valuation_quality_result:
+        reasons.append(f"估值與標的品質：{valuation_quality_result.get('investability_label', '資料不足')}，綜合分數 {valuation_quality_result.get('final_score', 50)}/100。")
+        reasons.extend([str(reason) for reason in list(valuation_quality_result.get("warnings", []) or [])[:2]])
     reasons.append(f"價格區：{cost_price_zone}。")
     reasons.extend(primary_reasons)
     reasons.extend(trend_reasons)
@@ -864,4 +940,5 @@ def make_decision(
         primary_reasons=primary_reasons[:3],
         reasons=reasons,
         module_scores=module_scores,
+        valuation_quality_result=valuation_quality_result,
     )

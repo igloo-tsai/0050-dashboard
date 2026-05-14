@@ -7,6 +7,8 @@ from typing import Any
 
 import pandas as pd
 
+from transaction_engine import calculate_broker_grade_portfolio
+
 
 INVENTORY_FILE = Path(__file__).with_name("inventory.json")
 INVENTORY_BACKUP_FILE = Path(__file__).with_name("inventory_backup.json")
@@ -67,8 +69,50 @@ def _normalize_record(record: dict[str, Any]) -> dict[str, Any] | None:
     if not ticker:
         return None
     name = str(record.get("name", "") or ("元大台灣50" if ticker == "0050.TW" else ticker))
-    side = str(record.get("side", record.get("type", "買入")) or "買入")
-    side = "賣出" if side in ("sell", "SELL", "賣出") else "買入"
+    raw_side = str(record.get("side", record.get("type", "買入")) or "買入")
+    if raw_side in ("dividend", "股利", "配息"):
+        return {
+            **record,
+            "ticker": ticker,
+            "name": name,
+            "date": str(record.get("date", "")),
+            "side": "dividend",
+            "type": "dividend",
+            "price": 0.0,
+            "lots": 0,
+            "odd_shares": 0,
+            "shares": 0,
+            "gross_amount": 0.0,
+            "fee": 0.0,
+            "fee_source": "manual",
+            "tax": max(0.0, float(record.get("tax_withheld", record.get("tax", 0.0)) or 0.0)),
+            "transaction_cost": max(0.0, float(record.get("tax_withheld", record.get("tax", 0.0)) or 0.0)),
+            "net_amount": float(record.get("dividend_received", 0.0) or 0.0),
+            "note": str(record.get("note", "") or ""),
+        }
+    if raw_side in ("fee_adjustment", "費用調整"):
+        fee = max(0.0, float(record.get("fee", 0.0) or 0.0))
+        tax = max(0.0, float(record.get("tax", 0.0) or 0.0))
+        return {
+            **record,
+            "ticker": ticker,
+            "name": name,
+            "date": str(record.get("date", "")),
+            "side": "fee_adjustment",
+            "type": "fee_adjustment",
+            "price": 0.0,
+            "lots": 0,
+            "odd_shares": 0,
+            "shares": 0,
+            "gross_amount": 0.0,
+            "fee": fee,
+            "fee_source": "manual",
+            "tax": tax,
+            "transaction_cost": fee + tax,
+            "net_amount": float(record.get("net_amount", 0.0) or 0.0),
+            "note": str(record.get("note", "") or ""),
+        }
+    side = "賣出" if raw_side in ("sell", "SELL", "賣出") else "買入"
     price = float(record.get("price", 0.0) or 0.0)
     lots = int(record.get("lots", 0) or 0)
     odd_shares = int(record.get("odd_shares", 0) or 0)
@@ -153,6 +197,28 @@ def summarize_inventory_by_ticker(
     current_prices: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     current_prices = {str(key).upper(): float(value or 0.0) for key, value in (current_prices or {}).items()}
+    tickers = sorted({str(record.get("ticker", "") or "").strip().upper() for record in records if record.get("ticker")})
+    if tickers:
+        summaries: list[dict[str, Any]] = []
+        for ticker in tickers:
+            ticker_records = get_inventory_by_ticker(records, ticker)
+            last_price = current_prices.get(ticker) or float(ticker_records[-1].get("price", 0.0) or 0.0) if ticker_records else 0.0
+            broker = calculate_broker_grade_portfolio(ticker_records, last_price, ticker, security_type="ETF")
+            total_shares = int(broker.get("total_shares", 0) or 0)
+            current_price = current_prices.get(ticker) or last_price
+            summaries.append(
+                {
+                    "ticker": ticker,
+                    "name": str(ticker_records[-1].get("name", "") or ticker) if ticker_records else ticker,
+                    "total_shares": total_shares,
+                    "total_cost": round(float(broker.get("total_cost_basis", 0.0) or 0.0), 0),
+                    "current_price": current_price,
+                    "market_value": round(float(broker.get("market_value", 0.0) or 0.0), 0),
+                    "unrealized_pnl": round(float(broker.get("unrealized_pnl", 0.0) or 0.0), 0),
+                    "unrealized_pnl_pct": round(float(broker.get("unrealized_pnl_pct", 0.0) or 0.0), 2),
+                }
+            )
+        return summaries
     grouped: dict[str, dict[str, Any]] = {}
     for record in sort_inventory_records(records):
         ticker = str(record.get("ticker", "") or "").strip().upper()
@@ -213,6 +279,57 @@ def calculate_inventory_summary(
 ) -> dict[str, Any]:
     valid_records = sort_inventory_records([record for record in records if float(record.get("price", 0.0) or 0.0) > 0])
     ticker = str(valid_records[0].get("ticker", "") or "") if valid_records else ""
+    current_price = max(0.0, float(current_price or 0.0))
+    broker = calculate_broker_grade_portfolio(valid_records, current_price, ticker, security_type="ETF")
+    total_shares = int(broker.get("total_shares", 0) or 0)
+    total_cost = float(broker.get("total_cost_basis", 0.0) or 0.0)
+    market_value = total_shares * current_price
+    total_assets = market_value + max(0.0, float(cash or 0.0))
+    average_cost = float(broker.get("average_cost", 0.0) or 0.0)
+    unrealized_pnl = float(broker.get("unrealized_pnl", 0.0) or 0.0)
+    unrealized_pnl_pct = float(broker.get("unrealized_pnl_pct", 0.0) or 0.0)
+    current_stock_ratio = market_value / total_assets * 100 if total_assets > 0 else 0.0
+    cash_ratio = max(0.0, float(cash or 0.0)) / total_assets * 100 if total_assets > 0 else 0.0
+    portfolio_summary = {
+        "total_cost": total_cost,
+        "market_value": market_value,
+        "unrealized_pnl": unrealized_pnl,
+        "pnl_pct": unrealized_pnl_pct,
+        "cash_ratio": cash_ratio,
+        "stock_ratio": current_stock_ratio,
+        "realized_pnl": float(broker.get("realized_pnl", 0.0) or 0.0),
+        "dividend_income": float(broker.get("dividend_income", 0.0) or 0.0),
+        "total_return": float(broker.get("total_return", 0.0) or 0.0),
+    }
+    return {
+        "ticker": ticker,
+        "total_shares": total_shares,
+        "total_lots": total_shares // 1000,
+        "total_odd_shares": total_shares % 1000,
+        "holding_lots": total_shares / 1000,
+        "total_cost": total_cost,
+        "average_cost": average_cost,
+        "market_value": market_value,
+        "unrealized_pnl": unrealized_pnl,
+        "unrealized_pnl_pct": unrealized_pnl_pct,
+        "current_stock_ratio": current_stock_ratio,
+        "total_assets": total_assets,
+        "max_stock_ratio": max_stock_ratio,
+        "portfolio_summary": portfolio_summary,
+        "records_detail": broker.get("open_lots", []),
+        "open_lots": broker.get("open_lots", []),
+        "realized_details": broker.get("realized_details", []),
+        "invalid_records": broker.get("invalid_records", []),
+        "broker_summary": broker,
+        "realized_pnl": float(broker.get("realized_pnl", 0.0) or 0.0),
+        "realized_pnl_pct": float(broker.get("realized_pnl_pct", 0.0) or 0.0),
+        "dividend_income": float(broker.get("dividend_income", 0.0) or 0.0),
+        "total_return": float(broker.get("total_return", 0.0) or 0.0),
+        "total_return_pct": float(broker.get("total_return_pct", 0.0) or 0.0),
+        "total_fees": float(broker.get("total_fees", 0.0) or 0.0),
+        "total_tax": float(broker.get("total_tax", 0.0) or 0.0),
+        "negative_position": bool(broker.get("errors")),
+    }
     total_shares = 0
     total_cost = 0.0
 
