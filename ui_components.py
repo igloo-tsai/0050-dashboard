@@ -127,6 +127,8 @@ def render_trader_decision_card(decision, portfolio: dict[str, object]) -> None:
     entry_probability = int(getattr(decision, "entry_probability", 0) or 0)
     position_mode_label = getattr(decision, "position_mode_label", "") or ""
     trade_plan = list(getattr(decision, "trade_plan", []) or [])
+    trader_plan_v2 = getattr(decision, "trader_plan_v2", {}) or {}
+    v2_levels = list(trader_plan_v2.get("levels", []) or []) if isinstance(trader_plan_v2, dict) else []
     first_batch = trade_plan[0] if trade_plan else {}
     second_batch = trade_plan[1] if len(trade_plan) > 1 else {}
     first_lots = int(first_batch.get("lots", 0) or 0)
@@ -156,14 +158,29 @@ def render_trader_decision_card(decision, portfolio: dict[str, object]) -> None:
         st.error(f"🚫 {next_action}")
 
     st.subheader("三層價格區")
-    price_cols = st.columns(3)
-    price_cols[0].metric("觀察價", format_price(observation_price))
-    price_cols[1].metric("合理價", format_price(reasonable_price))
-    price_cols[2].metric("保守價", format_price(conservative_price))
+    if v2_levels:
+        level_labels = {
+            "observation": "觀察 observation",
+            "fair": "合理 fair",
+            "conservative": "保守 conservative",
+        }
+        level_cols = st.columns(3)
+        for col, row in zip(level_cols, v2_levels):
+            level_type = str(row.get("type", ""))
+            with col:
+                st.metric(level_labels.get(level_type, level_type), format_price(float(row.get("price", 0.0) or 0.0)))
+                st.metric("預算", format_price(float(row.get("budget", 0.0) or 0.0)))
+                st.metric("可買", f"{int(row.get('lots', 0) or 0)} 張 {int(row.get('shares', 0) or 0)} 股")
+                st.caption(f"投入比例 {float(row.get('ratio', 0.0) or 0.0) * 100:.0f}%")
+    else:
+        price_cols = st.columns(3)
+        price_cols[0].metric("觀察價", format_price(observation_price))
+        price_cols[1].metric("合理價", format_price(reasonable_price))
+        price_cols[2].metric("保守價", format_price(conservative_price))
 
-    hint_cols = st.columns(2)
-    hint_cols[0].metric("第一批可買", f"{first_lots} 張 {first_shares} 股")
-    hint_cols[1].metric("跌到合理價可買", f"{second_lots} 張 {second_shares} 股")
+        hint_cols = st.columns(2)
+        hint_cols[0].metric("第一批可買", f"{first_lots} 張 {first_shares} 股")
+        hint_cols[1].metric("跌到合理價可買", f"{second_lots} 張 {second_shares} 股")
 
     if trade_plan:
         for row in trade_plan:

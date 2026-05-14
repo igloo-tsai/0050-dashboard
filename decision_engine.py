@@ -27,6 +27,7 @@ class DecisionResult:
     conservative_price: float
     potential_lots_at_reasonable: int
     trade_plan: list[dict[str, object]]
+    trader_plan_v2: dict[str, object]
     today_status: str
     conflict_flags: list[str]
     trade_record: dict[str, object]
@@ -319,6 +320,56 @@ def build_trade_plan(
             }
         )
     return plan
+
+
+def build_trader_plan_v2(
+    action_label: str,
+    total_budget: float,
+    observation_price: float,
+    fair_price: float,
+    conservative_price: float,
+    disabled: bool,
+) -> dict[str, object]:
+    action = "WAIT" if action_label in ("觀察", "暫緩進場") else "BUY"
+    summary = "暫緩" if action_label == "暫緩進場" else "觀察" if action_label == "觀察" else "買進"
+    level_specs = [
+        ("observation", observation_price, 0.30),
+        ("fair", fair_price, 0.30),
+        ("conservative", conservative_price, 0.40),
+    ]
+    levels: list[dict[str, object]] = []
+    for level_type, price, ratio in level_specs:
+        safe_price = max(0.0, float(price or 0.0))
+        budget = 0.0 if disabled else max(0.0, float(total_budget or 0.0) * ratio)
+        if safe_price <= 0 or budget <= 0:
+            lots = 0
+            shares = 0
+            amount = 0.0
+        else:
+            lots = int(budget // (safe_price * 1000))
+            remaining_budget = budget - lots * safe_price * 1000
+            shares = int(remaining_budget // safe_price)
+            shares = max(0, min(999, shares))
+            amount = lots * safe_price * 1000 + shares * safe_price
+        levels.append(
+            {
+                "type": level_type,
+                "price": round(safe_price, 2),
+                "budget": round(budget, 0),
+                "lots": lots,
+                "shares": shares,
+                "amount": round(amount, 0),
+                "ratio": ratio,
+            }
+        )
+    return {
+        "action": action,
+        "summary": summary,
+        "observation_price": round(float(observation_price or 0.0), 2),
+        "fair_price": round(float(fair_price or 0.0), 2),
+        "conservative_price": round(float(conservative_price or 0.0), 2),
+        "levels": levels,
+    }
 
 
 def normalize_lots_and_shares(lots: int, shares: int) -> tuple[int, int]:
@@ -628,6 +679,14 @@ def make_decision(
         cash=cash,
         max_position_ratio=max_position_ratio,
     )
+    trader_plan_v2 = build_trader_plan_v2(
+        action_label=action_label,
+        total_budget=available_budget,
+        observation_price=observation_price,
+        fair_price=reasonable_price,
+        conservative_price=conservative_price,
+        disabled=position_room <= 0,
+    )
     first_batch = trade_plan[0] if trade_plan else {}
     second_batch = trade_plan[1] if len(trade_plan) > 1 else {}
     if suggested_buy_lots <= 0 and suggested_buy_shares <= 0 and not price_far_above_cost and not over_position_limit:
@@ -732,6 +791,7 @@ def make_decision(
         "suggested_buy_lots": suggested_buy_lots,
         "suggested_buy_shares": suggested_buy_shares,
         "observation_price": observation_price,
+        "fair_price": reasonable_price,
         "reasonable_price": reasonable_price,
         "conservative_price": conservative_price,
         "available_budget": available_budget,
@@ -763,6 +823,7 @@ def make_decision(
         conservative_price=conservative_price,
         potential_lots_at_reasonable=potential_lots_at_reasonable,
         trade_plan=trade_plan,
+        trader_plan_v2=trader_plan_v2,
         today_status=today_status,
         conflict_flags=conflict_flags,
         trade_record=trade_record,
