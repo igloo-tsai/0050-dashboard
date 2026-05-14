@@ -20,6 +20,10 @@ class DecisionResult:
     suggested_bid: float
     suggested_buy_lots: int
     suggested_buy_shares: int
+    immediate_plan: str
+    immediate_lots: int
+    immediate_shares: int
+    immediate_price: float | None
     max_buy_lots: int
     available_budget: float
     observation_price: float
@@ -27,6 +31,7 @@ class DecisionResult:
     conservative_price: float
     potential_lots_at_reasonable: int
     trade_plan: list[dict[str, object]]
+    staged_plan: list[dict[str, object]]
     trader_plan_v2: dict[str, object]
     today_status: str
     conflict_flags: list[str]
@@ -333,9 +338,9 @@ def build_trader_plan_v2(
     action = "WAIT" if action_label in ("觀察", "暫緩進場") else "BUY"
     summary = "暫緩" if action_label == "暫緩進場" else "觀察" if action_label == "觀察" else "買進"
     level_specs = [
-        ("observation", observation_price, 0.30),
+        ("observation", observation_price, 0.20),
         ("fair", fair_price, 0.30),
-        ("conservative", conservative_price, 0.40),
+        ("conservative", conservative_price, 0.50),
     ]
     levels: list[dict[str, object]] = []
     for level_type, price, ratio in level_specs:
@@ -390,6 +395,8 @@ def validate_decision_consistency(
     next_action: str,
     available_budget: float,
     cash: float,
+    today_budget: float,
+    suggested_price: float,
     max_stock_ratio: float,
     over_target_ratio: bool,
     trade_plan: list[dict[str, object]],
@@ -413,14 +420,12 @@ def validate_decision_consistency(
     if suggested_buy_lots > max_buy_lots:
         suggested_buy_lots = max(0, int(max_buy_lots))
 
-    suggested_amount = 0.0
-    if trade_plan:
-        first_price = float(trade_plan[0].get("price", 0.0) or 0.0)
-        suggested_amount = suggested_buy_lots * first_price * 1000 + suggested_buy_shares * first_price
-    if suggested_amount > available_budget:
-        conflict_flags.append("建議買進金額超過今日預算")
-    if suggested_amount > cash:
-        conflict_flags.append("建議買進金額超過可用現金")
+    safe_suggested_price = max(0.0, float(suggested_price or 0.0))
+    suggested_amount = suggested_buy_lots * safe_suggested_price * 1000 + suggested_buy_shares * safe_suggested_price
+    if suggested_amount > today_budget + 1:
+        conflict_flags.append("????????????")
+    if suggested_amount > cash + 1:
+        conflict_flags.append("????????????")
 
     total_amount = sum(float(row.get("amount", 0.0) or 0.0) for row in trade_plan)
     if total_amount > available_budget + 1:
@@ -438,8 +443,9 @@ def validate_decision_consistency(
         if float(row.get("amount", 0.0) or 0.0) > float(row.get("batch_budget", 0.0) or 0.0) + 1:
             conflict_flags.append("分批策略單批投入超過該批預算")
             row["amount"] = float(row.get("batch_budget", 0.0) or 0.0)
-        if bool(row.get("over_limit_after_batch", False)):
-            conflict_flags.append("建議買進後超過部位上限")
+        if bool(row.get("over_limit_after_batch", False)) and float(row.get("amount", 0.0) or 0.0) > 0 and (suggested_buy_lots > 0 or suggested_buy_shares > 0):
+            conflict_flags.append("???????????")
+
 
     if action_label in ("可加碼", "分批加碼", "積極加碼") and suggested_buy_lots == 0 and suggested_buy_shares == 0:
         conflict_flags.append("AI狀態與建議張數不一致")
@@ -479,6 +485,8 @@ def make_decision(
     max_position_decimal = max(0.0, max_position_ratio) / 100.0
     remaining_ratio = max(0.0, max_position_decimal - stock_ratio)
     max_allow_invest = remaining_ratio * total_asset
+    if portfolio.get("negative_position"):
+        max_allow_invest = 0.0
     today_budget = float(today_budget if today_budget is not None else portfolio.get("max_single_investment", cash))
     position_room = max_allow_invest
     available_budget = max(0.0, min(today_budget, cash, position_room))
@@ -689,9 +697,6 @@ def make_decision(
     )
     first_batch = trade_plan[0] if trade_plan else {}
     second_batch = trade_plan[1] if len(trade_plan) > 1 else {}
-    if suggested_buy_lots <= 0 and suggested_buy_shares <= 0 and not price_far_above_cost and not over_position_limit:
-        suggested_buy_lots = int(first_batch.get("lots", 0) or 0)
-        suggested_buy_shares = int(first_batch.get("shares", 0) or 0)
 
     if position_room <= 0:
         today_status = "禁止加碼"
@@ -703,6 +708,10 @@ def make_decision(
         today_status = "現在可買"
     else:
         today_status = "等待回檔"
+    if today_status != "現在可買":
+        suggested_buy_lots = 0
+        suggested_buy_shares = 0
+
     next_action = build_next_action(
         today_status,
         action_label,
@@ -730,6 +739,8 @@ def make_decision(
         next_action=next_action,
         available_budget=available_budget,
         cash=cash,
+        today_budget=today_budget,
+        suggested_price=reasonable_price,
         max_stock_ratio=max_position_ratio,
         over_target_ratio=bool(portfolio.get("over_target_ratio", False)) or position_room <= 0,
         trade_plan=trade_plan,
@@ -781,6 +792,11 @@ def make_decision(
     reasons.append(str(market.get("text", "市場背景資料有限。")))
     reasons.append(f"量能判讀：{volume.get('volume_signal', '量能資料不足')}。")
     reasons.append(f"進場機率：{entry_probability}/100（{probability_text(entry_probability)}）。")
+    immediate_plan = "立即執行" if today_status == "現在可買" and (suggested_buy_lots > 0 or suggested_buy_shares > 0) else "不立即掛單"
+    immediate_lots = suggested_buy_lots if immediate_plan == "立即執行" else 0
+    immediate_shares = suggested_buy_shares if immediate_plan == "立即執行" else 0
+    immediate_price = reasonable_price if immediate_plan == "立即執行" else None
+
     trade_record = {
         "date": date.today().isoformat(),
         "ticker": ticker,
@@ -790,6 +806,10 @@ def make_decision(
         "today_status": today_status,
         "suggested_buy_lots": suggested_buy_lots,
         "suggested_buy_shares": suggested_buy_shares,
+        "immediate_plan": immediate_plan,
+        "immediate_lots": immediate_lots,
+        "immediate_shares": immediate_shares,
+        "immediate_price": immediate_price,
         "observation_price": observation_price,
         "fair_price": reasonable_price,
         "reasonable_price": reasonable_price,
@@ -816,6 +836,10 @@ def make_decision(
         suggested_bid=suggested_bid,
         suggested_buy_lots=suggested_buy_lots,
         suggested_buy_shares=suggested_buy_shares,
+        immediate_plan=immediate_plan,
+        immediate_lots=immediate_lots,
+        immediate_shares=immediate_shares,
+        immediate_price=immediate_price,
         max_buy_lots=max_buy_lots,
         available_budget=available_budget,
         observation_price=observation_price,
@@ -823,6 +847,7 @@ def make_decision(
         conservative_price=conservative_price,
         potential_lots_at_reasonable=potential_lots_at_reasonable,
         trade_plan=trade_plan,
+        staged_plan=trade_plan,
         trader_plan_v2=trader_plan_v2,
         today_status=today_status,
         conflict_flags=conflict_flags,

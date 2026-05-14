@@ -12,12 +12,14 @@ from portfolio_engine import calculate_portfolio
 from storage import (
     FEE_RATE,
     calculate_inventory_summary as build_inventory_summary,
+    consume_storage_warnings,
     get_inventory_by_ticker,
     load_inventory,
     load_trade_log,
     log_trade,
     save_inventory,
     save_trade_log,
+    summarize_inventory_by_ticker,
 )
 from technical_analysis import build_technical_snapshot
 from ui_components import (
@@ -34,6 +36,7 @@ from ui_components import (
     render_risk_detail,
     render_score_cards,
     render_self_check,
+    render_system_check_panel,
     render_trader_decision_card,
     render_trade_record_summary,
     render_trade_log_performance,
@@ -121,69 +124,68 @@ def render_trade_log_section(prefix: str, decision, portfolio: dict[str, object]
     records = list(st.session_state.get("trade_log_records", []))
     render_trade_log_performance(records, portfolio)
 
-    with st.expander("交易紀錄 trade_log", expanded=False):
-        st.caption(f"目前已記錄 {len(records)} 筆交易")
-        if st.session_state.get("trade_log_status_message"):
-            st.caption(str(st.session_state.trade_log_status_message))
+    st.subheader("交易紀錄")
+    st.caption(f"目前已載入 {len(records)} 筆交易紀錄")
+    if st.session_state.get("trade_log_status_message"):
+        st.caption(str(st.session_state.trade_log_status_message))
 
-        st.subheader("AI建議買入記錄")
-        ai_lots = int(getattr(decision, "suggested_buy_lots", 0) or 0)
-        ai_shares = int(getattr(decision, "suggested_buy_shares", 0) or 0)
-        ai_total_shares = ai_lots * 1000 + ai_shares
-        ai_price = float(
-            getattr(decision, "reasonable_price", None)
-            or getattr(decision, "suggested_bid", None)
-            or current_price
-            or 0.0
-        )
-        st.caption(f"AI建議：{ai_lots} 張 {ai_shares} 股，參考價格 {format_price(ai_price)}")
-        if st.button("依 AI 建議記錄買入", key=f"{prefix}_log_ai_buy"):
-            if ai_total_shares <= 0 or ai_price <= 0:
-                st.warning("目前 AI 沒有可記錄的買入股數。")
-            else:
-                log_trade("買入", ai_price, ai_total_shares, ai_price * ai_total_shares)
-                reload_trade_log("已依 AI 建議新增一筆買入交易。")
-                st.success("已寫入 trade_log.json。")
-                st.rerun()
-
-        st.divider()
-        st.subheader("手動新增交易")
-        cols = st.columns(4)
-        with cols[0]:
-            action = st.selectbox("買賣", options=["買入", "賣出"], key=f"{prefix}_trade_action")
-        with cols[1]:
-            trade_price = st.number_input("成交價", min_value=0.0, value=float(current_price), step=0.05, key=f"{prefix}_trade_price")
-        with cols[2]:
-            trade_shares = st.number_input("股數", min_value=0, value=0, step=1, key=f"{prefix}_trade_shares")
-        with cols[3]:
-            trade_amount = st.number_input("成交金額（可留 0）", min_value=0.0, value=0.0, step=1000.0, key=f"{prefix}_trade_amount")
-
-        action_cols = st.columns(3)
-        if action_cols[0].button("新增交易紀錄", key=f"{prefix}_add_trade_log"):
-            amount = float(trade_amount or 0.0)
-            if amount <= 0:
-                amount = float(trade_price) * int(trade_shares)
-            if trade_price <= 0 or trade_shares <= 0 or amount <= 0:
-                st.warning("請輸入成交價與股數。")
-            else:
-                log_trade(action, float(trade_price), int(trade_shares), amount)
-                reload_trade_log("已新增一筆手動交易。")
-                st.success("交易紀錄已寫入 trade_log.json。")
-                st.rerun()
-
-        if action_cols[1].button("📂 載入交易紀錄", key=f"{prefix}_load_trade_log"):
-            reload_trade_log("已從 trade_log.json 載入。")
-            st.success("交易紀錄已重新載入。")
+    st.subheader("AI建議買入紀錄")
+    ai_lots = int(getattr(decision, "suggested_buy_lots", 0) or 0)
+    ai_shares = int(getattr(decision, "suggested_buy_shares", 0) or 0)
+    ai_total_shares = ai_lots * 1000 + ai_shares
+    ai_price = float(
+        getattr(decision, "reasonable_price", None)
+        or getattr(decision, "suggested_bid", None)
+        or current_price
+        or 0.0
+    )
+    st.caption(f"AI建議：{ai_lots} 張 {ai_shares} 股，價格 {format_price(ai_price)}")
+    if st.button("將 AI 建議買入寫入交易紀錄", key=f"{prefix}_log_ai_buy"):
+        if ai_total_shares <= 0 or ai_price <= 0:
+            st.warning("目前 AI 沒有可寫入的買入股數。")
+        else:
+            log_trade("買入", ai_price, ai_total_shares, ai_price * ai_total_shares)
+            reload_trade_log("已將 AI 建議寫入交易紀錄。")
+            st.success("已寫入 trade_log.json")
             st.rerun()
 
-        if action_cols[2].button("🗑 清空交易紀錄", key=f"{prefix}_clear_trade_log"):
-            save_trade_log([])
-            reload_trade_log("交易紀錄已清空。")
-            st.warning("trade_log 已清空。")
+    st.divider()
+    st.subheader("手動新增交易")
+    cols = st.columns(4)
+    with cols[0]:
+        action = st.selectbox("交易類型", options=["買入", "賣出"], key=f"{prefix}_trade_action")
+    with cols[1]:
+        trade_price = st.number_input("成交價", min_value=0.0, value=float(current_price), step=0.05, key=f"{prefix}_trade_price")
+    with cols[2]:
+        trade_shares = st.number_input("股數", min_value=0, value=0, step=1, key=f"{prefix}_trade_shares")
+    with cols[3]:
+        trade_amount = st.number_input("成交金額，可填 0 自動計算", min_value=0.0, value=0.0, step=1000.0, key=f"{prefix}_trade_amount")
+
+    action_cols = st.columns(3)
+    if action_cols[0].button("新增交易紀錄", key=f"{prefix}_add_trade_log"):
+        amount = float(trade_amount or 0.0)
+        if amount <= 0:
+            amount = float(trade_price) * int(trade_shares)
+        if trade_price <= 0 or trade_shares <= 0 or amount <= 0:
+            st.warning("請輸入有效成交價、股數與金額。")
+        else:
+            log_trade(action, float(trade_price), int(trade_shares), amount)
+            reload_trade_log("已新增一筆交易紀錄。")
+            st.success("交易紀錄已寫入 trade_log.json")
             st.rerun()
 
-        render_trade_log_records(list(st.session_state.get("trade_log_records", [])))
+    if action_cols[1].button("載入交易紀錄", key=f"{prefix}_load_trade_log"):
+        reload_trade_log("已從 trade_log.json 載入。")
+        st.success("交易紀錄已重新載入。")
+        st.rerun()
 
+    if action_cols[2].button("清空交易紀錄", key=f"{prefix}_clear_trade_log"):
+        save_trade_log([])
+        reload_trade_log("交易紀錄已清空。")
+        st.warning("trade_log 已清空。")
+        st.rerun()
+
+    render_trade_log_records(list(st.session_state.get("trade_log_records", [])))
 
 def normalize_inventory_editor_rows(edited_rows: pd.DataFrame) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
@@ -442,7 +444,7 @@ def run_analysis_page(label: str, ticker: str, prefix: str, start: date, end: da
     price_cols[1].metric("價格來源", str(inputs.get("price_source", "系統行情")))
     if latest_close > 0 and abs(current_price - latest_close) / latest_close >= 0.10:
         st.warning("手動價格與最新收盤價差異較大，請確認是否為即時盤中價格。")
-    render_trader_decision_card(decision, portfolio)
+    render_trader_decision_card(decision)
     render_holding_pnl_card(portfolio)
     render_trade_log_section(prefix, decision, portfolio, current_price)
     render_position_summary_card(portfolio)
@@ -525,7 +527,7 @@ def save_ticker_inventory(ticker: str, ticker_records: list[dict[str, object]], 
 def render_target_inventory_manager(ticker: str, name: str, prefix: str, current_price: float) -> list[dict[str, object]]:
     all_records = list(st.session_state.get("inventory_records", []))
     ticker_records = get_inventory_by_ticker(all_records, ticker)
-    with st.expander("庫存明細 / 新增紀錄", expanded=False):
+    with st.expander("📦 庫存明細 / 新增紀錄", expanded=False):
         st.caption(f"{ticker} 已載入 {len(ticker_records)} 筆庫存")
         if st.session_state.get("inventory_status_message"):
             st.caption(str(st.session_state.inventory_status_message))
@@ -610,26 +612,37 @@ def render_target_inventory_manager(ticker: str, name: str, prefix: str, current
     return get_inventory_by_ticker(list(st.session_state.get("inventory_records", [])), ticker)
 
 
-def render_price_selector(prefix: str, latest_close: float) -> dict[str, float | str]:
-    cols = st.columns(2)
-    with cols[0]:
-        current_price = st.number_input("目前市價", min_value=0.0, value=float(latest_close), step=0.05, key=f"{prefix}_target_current_price")
-    price_source = "使用者手動輸入" if abs(float(current_price) - float(latest_close)) > 0.001 else "最新收盤價"
-    cols[1].metric("價格來源", price_source)
-    return {"current_price": float(current_price), "price_source": price_source}
+def get_target_params(prefix: str, latest_close: float) -> dict[str, float | str | None]:
+    current_price = float(st.session_state.get(f"{prefix}_target_current_price", latest_close) or latest_close or 0.0)
+    cash = float(st.session_state.get(f"{prefix}_target_cash", 100_000.0) or 0.0)
+    manual_volume_raw = float(st.session_state.get(f"{prefix}_target_manual_volume", 0.0) or 0.0)
+    today_budget = float(st.session_state.get(f"{prefix}_target_today_budget", 100_000.0) or 0.0)
+    max_ratio = float(st.session_state.get(f"{prefix}_target_max_ratio", 70.0) or 0.0)
+    price_source = "使用者手動輸入" if abs(current_price - float(latest_close or 0.0)) > 0.001 else "最新收盤價"
+    return {
+        "cash": cash,
+        "current_price": current_price,
+        "manual_volume": manual_volume_raw if manual_volume_raw > 0 else None,
+        "today_budget": today_budget,
+        "max_ratio": max_ratio,
+        "price_source": price_source,
+    }
 
 
-def render_target_inputs(prefix: str) -> dict[str, float | None]:
-    with st.expander("投資參數", expanded=False):
+def render_target_inputs(prefix: str, latest_close: float) -> dict[str, float | None]:
+    with st.expander("⚙️ 投資參數", expanded=False):
         cols = st.columns(2)
         with cols[0]:
+            st.number_input("目前市價", min_value=0.0, value=float(st.session_state.get(f"{prefix}_target_current_price", latest_close) or latest_close), step=0.05, key=f"{prefix}_target_current_price")
             cash = st.number_input("可投入現金", min_value=0.0, value=100_000.0, step=10_000.0, key=f"{prefix}_target_cash")
         with cols[1]:
             manual_volume = st.number_input("今日成交量，可選填", min_value=0.0, value=0.0, step=1000.0, key=f"{prefix}_target_manual_volume")
             today_budget = st.number_input("今日預算投資金額", min_value=0.0, value=100_000.0, step=10_000.0, key=f"{prefix}_target_today_budget")
             max_ratio = st.slider("這檔最多佔整體資金比例", min_value=0, max_value=100, value=70, step=5, key=f"{prefix}_target_max_ratio")
+        st.caption("調整後頁面會依新參數重新計算。")
     return {
         "cash": cash,
+        "current_price": float(st.session_state.get(f"{prefix}_target_current_price", latest_close) or latest_close or 0.0),
         "manual_volume": manual_volume if manual_volume > 0 else None,
         "today_budget": today_budget,
         "max_ratio": float(max_ratio),
@@ -662,6 +675,65 @@ def render_inventory_summary(summary: dict[str, object]) -> None:
         st.warning("同一標的庫存出現負股數，請檢查賣出紀錄。")
 
 
+def validate_system_state(
+    decision,
+    portfolio: dict[str, object],
+    summary: dict[str, object],
+    ticker_records: list[dict[str, object]],
+    current_ticker: str,
+    current_price: float,
+    inputs: dict[str, object],
+) -> list[str]:
+    flags: list[str] = []
+    suggested_lots = int(getattr(decision, "suggested_buy_lots", 0) or 0)
+    suggested_shares = int(getattr(decision, "suggested_buy_shares", 0) or 0)
+    suggested_price = float(
+        getattr(decision, "immediate_price", None)
+        or getattr(decision, "reasonable_price", getattr(decision, "suggested_bid", current_price))
+        or current_price
+        or 0.0
+    )
+    suggested_amount = suggested_lots * suggested_price * 1000 + suggested_shares * suggested_price
+    available_budget = float(getattr(decision, "available_budget", 0.0) or 0.0)
+    today_budget = float(inputs.get("today_budget", 0.0) or 0.0)
+    cash = float(inputs.get("cash", 0.0) or 0.0)
+    max_ratio = float(inputs.get("max_ratio", 0.0) or 0.0)
+
+    if bool(portfolio.get("over_target_ratio", False)) and (suggested_lots > 0 or suggested_shares > 0):
+        flags.append("部位超標時仍產生買入建議")
+    if suggested_amount > today_budget + 1:
+        flags.append("建議投入超過今日預算")
+    if suggested_amount > cash + 1:
+        flags.append("建議投入超過可用現金")
+    if suggested_shares >= 1000:
+        flags.append("零股數量超過 999，應自動轉為張數")
+    observation = float(getattr(decision, "observation_price", 0.0) or 0.0)
+    reasonable = float(getattr(decision, "reasonable_price", 0.0) or 0.0)
+    conservative = float(getattr(decision, "conservative_price", 0.0) or 0.0)
+    if not (current_price >= observation >= reasonable >= conservative):
+        flags.append("價格層級不符合 current >= observation >= reasonable >= conservative")
+
+    summary_avg = float(summary.get("average_cost", 0.0) or 0.0)
+    portfolio_avg = float(portfolio.get("average_cost", 0.0) or 0.0)
+    if abs(summary_avg - portfolio_avg) > 0.01:
+        flags.append("庫存平均成本與 AI 使用平均成本不一致")
+    if bool(summary.get("negative_position", False)):
+        flags.append("此標的賣出股數大於買入股數，請檢查庫存")
+    if any(float(record.get("price", 0.0) or 0.0) <= 0 for record in ticker_records):
+        flags.append("存在 price <= 0 的庫存紀錄，應自動忽略")
+    if any(str(record.get("ticker", "") or "").upper() != current_ticker.upper() for record in ticker_records):
+        flags.append("目前標的混入其他 ticker 庫存")
+
+    total_trade_amount = sum(float(row.get("amount", 0.0) or 0.0) for row in list(getattr(decision, "trade_plan", []) or []))
+    if total_trade_amount > available_budget + 1:
+        flags.append("分批總投入超過 available_budget")
+    if not list(getattr(decision, "trade_plan", []) or []) and not (getattr(decision, "observation_price", None) and getattr(decision, "reasonable_price", None) and getattr(decision, "conservative_price", None)):
+        flags.append("trade_plan 為空且缺少 fallback 三層價格")
+    if max_ratio > 0 and float(summary.get("current_stock_ratio", 0.0) or 0.0) > max_ratio and (suggested_lots > 0 or suggested_shares > 0):
+        flags.append("買入建議會使部位上限風控失效")
+    return list(dict.fromkeys(flags))
+
+
 def render_target_page(label: str, ticker: str, prefix: str, start: date, end: date) -> None:
     with st.spinner("正在取得行情與計算 AI 決策..."):
         resolved_ticker, data = fetch_taiwan_stock(ticker, start, end)
@@ -673,14 +745,14 @@ def render_target_page(label: str, ticker: str, prefix: str, start: date, end: d
         latest_close = float(data["Close"].dropna().iloc[-1])
 
     st.subheader(display_name(label, resolved_ticker))
-    price_info = render_price_selector(prefix, latest_close)
-    current_price = float(price_info["current_price"] or latest_close or 0.0)
-    st.metric("目前決策價格", format_price(current_price))
+    inputs = get_target_params(prefix, latest_close)
+    current_price = float(inputs["current_price"] or latest_close or 0.0)
+    st.caption(f"目前決策價格：{format_price(current_price)}｜價格來源：{inputs.get('price_source', '最新收盤價')}")
     if latest_close > 0 and abs(current_price - latest_close) / latest_close >= 0.10:
         st.warning("手動價格與最新收盤價差異較大，請確認是否為即時盤中價格。")
 
-    inputs = render_target_inputs(prefix)
-    ticker_records = render_target_inventory_manager(resolved_ticker, label, prefix, current_price)
+    all_records = list(st.session_state.get("inventory_records", []))
+    ticker_records = get_inventory_by_ticker(all_records, resolved_ticker)
     summary = build_inventory_summary(ticker_records, current_price, float(inputs["cash"] or 0.0), float(inputs["max_ratio"] or 0.0))
 
     if data.empty:
@@ -705,6 +777,10 @@ def render_target_page(label: str, ticker: str, prefix: str, start: date, end: d
         max_single_investment=float(inputs["today_budget"] or 0.0),
         max_stock_ratio=float(inputs["max_ratio"] or 0.0),
     )
+    if summary.get("negative_position"):
+        portfolio["over_target_ratio"] = True
+        portfolio["position_room_amount"] = 0.0
+        portfolio["negative_position"] = True
     if abs(float(portfolio.get("average_cost", 0.0) or 0.0) - float(summary.get("average_cost", 0.0) or 0.0)) > 0.01:
         st.warning("AI使用的平均成本與庫存計算結果不一致，請檢查資料。")
     decision = make_decision(
@@ -719,13 +795,17 @@ def render_target_page(label: str, ticker: str, prefix: str, start: date, end: d
         ticker=resolved_ticker,
         latest_close=latest_close,
     )
+    system_flags = validate_system_state(decision, portfolio, summary, ticker_records, resolved_ticker, current_price, inputs)
 
-    render_trader_decision_card(decision, portfolio)
+    render_trader_decision_card(decision)
     render_inventory_summary(summary)
-    render_trade_log_section(prefix, decision, portfolio, current_price)
-    render_key_reasons(decision)
+    render_system_check_panel(system_flags)
+    render_target_inputs(prefix, latest_close)
+    ticker_records = render_target_inventory_manager(resolved_ticker, label, prefix, current_price)
 
     with st.expander("進階分析細節", expanded=False):
+        render_trade_log_section(prefix, decision, portfolio, current_price)
+        render_key_reasons(decision)
         render_self_check(decision)
         render_trade_record_summary(decision)
         render_risk_detail(decision)
@@ -738,6 +818,218 @@ def render_target_page(label: str, ticker: str, prefix: str, start: date, end: d
         render_price_trend_chart(analysis_data, f"{display_name(label, resolved_ticker)} 價格趨勢")
 
 
+def normalize_inventory_ticker(raw_ticker: str) -> str:
+    ticker = str(raw_ticker or "").strip().upper()
+    if not ticker:
+        return ""
+    ticker = ticker.replace(".TWO", ".TW")
+    if ticker.endswith(".TW"):
+        return ticker
+    if ticker.isdigit() and len(ticker) == 4:
+        return f"{ticker}.TW"
+    return ticker
+
+
+def normalize_all_inventory_editor_rows(edited_rows: pd.DataFrame) -> list[dict[str, object]]:
+    records: list[dict[str, object]] = []
+    for _, row in edited_rows.iterrows():
+        if bool(row.get("delete", False)):
+            continue
+        ticker = normalize_inventory_ticker(str(row.get("ticker", "") or ""))
+        price = float(row.get("price", 0.0) or 0.0)
+        lots = int(row.get("lots", 0) or 0)
+        odd_shares = int(row.get("odd_shares", 0) or 0)
+        if not ticker or price <= 0 or (lots <= 0 and odd_shares <= 0):
+            continue
+        side = str(row.get("type", row.get("side", "買入")) or "買入")
+        if side not in ("買入", "賣出"):
+            side = "買入"
+        records.append(
+            {
+                "ticker": ticker,
+                "name": str(row.get("name", "") or ticker),
+                "date": str(row.get("date", "") or ""),
+                "side": side,
+                "type": side,
+                "price": price,
+                "lots": lots,
+                "odd_shares": odd_shares,
+                "fee": float(row.get("fee", 0.0) or 0.0),
+                "fee_source": str(row.get("fee_source", "手動輸入") or "手動輸入"),
+                "tax": float(row.get("tax", 0.0) or 0.0),
+                "note": str(row.get("note", "") or ""),
+            }
+        )
+    return records
+
+
+def fetch_inventory_latest_prices(records: list[dict[str, object]], start: date, end: date) -> dict[str, float]:
+    prices: dict[str, float] = {}
+    tickers = sorted({str(record.get("ticker", "") or "").strip().upper() for record in records if record.get("ticker")})
+    for ticker in tickers:
+        try:
+            _, data = fetch_taiwan_stock(ticker, start, end)
+            close = data["Close"].dropna() if not data.empty and "Close" in data else pd.Series(dtype=float)
+            if not close.empty:
+                prices[ticker] = float(close.iloc[-1])
+        except Exception:
+            continue
+    return prices
+
+
+def render_inventory_summary_by_ticker(records: list[dict[str, object]], current_prices: dict[str, float]) -> None:
+    st.subheader("各標的彙總")
+    summary_rows = summarize_inventory_by_ticker(records, current_prices)
+    if not summary_rows:
+        st.info("目前沒有可彙總的庫存紀錄。")
+        return
+    display = pd.DataFrame(summary_rows)
+    display = display.rename(
+        columns={
+            "ticker": "ticker",
+            "name": "名稱",
+            "total_shares": "總股數",
+            "total_cost": "總成本",
+            "current_price": "估算現價",
+            "market_value": "目前市值",
+            "unrealized_pnl": "未實現損益",
+            "unrealized_pnl_pct": "未實現報酬率%",
+        }
+    )
+    if "未實現報酬率%" in display.columns:
+        styled = display.style.map(
+            lambda value: "color: #22c55e" if float(value or 0) >= 0 else "color: #ef4444",
+            subset=["未實現報酬率%"],
+        )
+        st.dataframe(styled, hide_index=True, use_container_width=True)
+    else:
+        st.dataframe(display, hide_index=True, use_container_width=True)
+
+
+def render_all_inventory_page(start: date, end: date) -> None:
+    st.subheader("全部庫存")
+    all_records = list(st.session_state.get("inventory_records", []))
+    st.caption(f"目前 inventory.json 共 {len(all_records)} 筆庫存紀錄。新增、修改或刪除後會自動儲存。")
+    if st.session_state.get("inventory_status_message"):
+        st.caption(str(st.session_state.inventory_status_message))
+
+    with st.spinner("正在更新各標的估算現價..."):
+        current_prices = fetch_inventory_latest_prices(all_records, start, end) if all_records else {}
+    render_inventory_summary_by_ticker(all_records, current_prices)
+
+    tickers = sorted({str(record.get("ticker", "") or "").strip().upper() for record in all_records if record.get("ticker")})
+    filter_options = ["全部"] + tickers
+    selected_ticker = st.selectbox("依 ticker 篩選", options=filter_options, key="all_inventory_filter")
+    filtered_records = all_records if selected_ticker == "全部" else get_inventory_by_ticker(all_records, selected_ticker)
+
+    st.subheader("庫存明細")
+    render_inventory_records(filtered_records)
+
+    st.subheader("修改 / 刪除庫存")
+    if filtered_records:
+        editor_df = pd.DataFrame(filtered_records)
+        if "type" not in editor_df.columns:
+            editor_df["type"] = editor_df.get("side", "買入")
+        editor_columns = ["ticker", "name", "date", "type", "price", "lots", "odd_shares", "fee", "fee_source", "tax", "note"]
+        editor_df = editor_df[[column for column in editor_columns if column in editor_df.columns]]
+        editor_df.insert(0, "delete", False)
+        edited_df = st.data_editor(
+            editor_df,
+            hide_index=True,
+            use_container_width=True,
+            num_rows="fixed",
+            key="all_inventory_editor",
+            column_config={
+                "delete": st.column_config.CheckboxColumn("刪除"),
+                "ticker": st.column_config.TextColumn("ticker"),
+                "name": st.column_config.TextColumn("name"),
+                "date": st.column_config.TextColumn("date"),
+                "type": st.column_config.SelectboxColumn("type", options=["買入", "賣出"]),
+                "price": st.column_config.NumberColumn("price", min_value=0.0, step=0.05),
+                "lots": st.column_config.NumberColumn("lots", min_value=0, step=1),
+                "odd_shares": st.column_config.NumberColumn("odd_shares", min_value=0, max_value=999, step=1),
+                "fee": st.column_config.NumberColumn("fee", min_value=0.0, step=1.0),
+                "fee_source": st.column_config.SelectboxColumn("fee_source", options=["手動輸入", "系統估算"]),
+                "tax": st.column_config.NumberColumn("tax", min_value=0.0, step=1.0),
+                "note": st.column_config.TextColumn("note"),
+            },
+        )
+        if st.button("套用修改並自動儲存", key="all_inventory_apply_edits"):
+            updated_records = normalize_all_inventory_editor_rows(edited_df)
+            if selected_ticker == "全部":
+                next_records = updated_records
+            else:
+                other_records = [
+                    record
+                    for record in all_records
+                    if str(record.get("ticker", "") or "").strip().upper() != selected_ticker
+                ]
+                next_records = other_records + updated_records
+            set_inventory_records(next_records, "全部庫存已自動儲存。")
+            st.success("已自動儲存 inventory.json。")
+            st.rerun()
+    else:
+        st.info("目前篩選條件下沒有庫存紀錄。")
+
+    st.divider()
+    st.subheader("新增一筆庫存")
+    add_cols = st.columns(3)
+    with add_cols[0]:
+        raw_ticker = st.text_input("ticker", value="0050.TW", key="all_inventory_new_ticker")
+    with add_cols[1]:
+        record_name = st.text_input("name", value="元大台灣50", key="all_inventory_new_name")
+    with add_cols[2]:
+        record_date = st.date_input("date", value=date.today(), key="all_inventory_new_date")
+
+    add_cols = st.columns(4)
+    with add_cols[0]:
+        record_side = st.selectbox("type", options=["買入", "賣出"], key="all_inventory_new_type")
+    with add_cols[1]:
+        record_price = st.number_input("price", min_value=0.0, value=0.0, step=0.05, key="all_inventory_new_price")
+    with add_cols[2]:
+        record_lots = st.number_input("lots", min_value=0, value=0, step=1, key="all_inventory_new_lots")
+    with add_cols[3]:
+        record_odd_shares = st.number_input("odd_shares", min_value=0, max_value=999, value=0, step=1, key="all_inventory_new_odd")
+
+    total_shares = int(record_lots) * 1000 + int(record_odd_shares)
+    estimated_fee = round(float(record_price) * total_shares * FEE_RATE, 0)
+    add_cols = st.columns(4)
+    with add_cols[0]:
+        record_fee = st.number_input("fee", min_value=0.0, value=float(estimated_fee), step=1.0, key="all_inventory_new_fee")
+        st.caption(f"系統估算：{format_price(estimated_fee)}")
+    with add_cols[1]:
+        record_fee_source = st.selectbox("fee_source", options=["手動輸入", "系統估算"], key="all_inventory_new_fee_source")
+    with add_cols[2]:
+        record_tax = st.number_input("tax", min_value=0.0, value=0.0, step=1.0, key="all_inventory_new_tax")
+    with add_cols[3]:
+        record_note = st.text_input("note", value="", key="all_inventory_new_note")
+
+    if st.button("新增並自動儲存", key="all_inventory_add_record"):
+        ticker = normalize_inventory_ticker(raw_ticker)
+        if not ticker:
+            st.warning("請輸入 ticker，例如 0050.TW 或 2330.TW。")
+        elif record_price <= 0 or total_shares <= 0:
+            st.warning("請輸入有效成交價與張數或零股。")
+        else:
+            new_record = {
+                "ticker": ticker,
+                "name": record_name or ticker,
+                "date": record_date.isoformat(),
+                "side": record_side,
+                "type": record_side,
+                "price": float(record_price),
+                "lots": int(record_lots),
+                "odd_shares": int(record_odd_shares),
+                "fee": float(record_fee),
+                "fee_source": record_fee_source,
+                "tax": float(record_tax),
+                "note": record_note,
+            }
+            set_inventory_records(all_records + [new_record], "已新增庫存並自動儲存。")
+            st.success("已新增並自動儲存 inventory.json。")
+            st.rerun()
+
+
 def main() -> None:
     st.set_page_config(page_title="AI 投資決策資訊系統", page_icon="0050", layout="wide")
     init_inventory_state()
@@ -745,10 +1037,12 @@ def main() -> None:
     inject_mobile_css()
     st.title("AI 投資決策資訊系統")
     st.caption("以 0050 與台股個股為核心，整合技術面、量能、市場背景與個人持倉風控。")
+    for warning in consume_storage_warnings():
+        st.warning(warning)
 
     start = date(2021, 1, 1)
     end = date.today()
-    tab_0050, tab_stock = st.tabs(["0050 AI決策", "台股AI分析"])
+    tab_0050, tab_stock, tab_inventory = st.tabs(["0050 AI決策", "台股AI分析", "全部庫存"])
 
     with tab_0050:
         st.subheader("0050 專頁")
@@ -768,6 +1062,9 @@ def main() -> None:
             st.warning("請輸入台股代碼，例如 2330，或常見公司名稱，例如 台積電。")
         else:
             render_target_page(label, ticker, "stock_ai", start, end)
+
+    with tab_inventory:
+        render_all_inventory_page(start, end)
 
 
 if __name__ == "__main__":

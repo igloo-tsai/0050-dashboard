@@ -14,6 +14,37 @@ TRADE_LOG_FILE = Path(__file__).with_name("trade_log.json")
 TRADE_LOG_BACKUP_FILE = Path(__file__).with_name("trade_log_backup.json")
 FEE_RATE = 0.001425
 TAX_RATE = 0.001
+STOCK_TAX_RATE = 0.003
+
+STORAGE_WARNINGS: list[str] = []
+
+
+def consume_storage_warnings() -> list[str]:
+    warnings = list(STORAGE_WARNINGS)
+    STORAGE_WARNINGS.clear()
+    return warnings
+
+
+def _normalize_inventory_list(data: Any) -> list[dict[str, Any]]:
+    if not isinstance(data, list):
+        raise ValueError("JSON content is not a list")
+    normalized = []
+    for record in data:
+        if not isinstance(record, dict):
+            continue
+        normalized_record = _normalize_record(record)
+        if normalized_record is not None:
+            normalized.append(normalized_record)
+    return sort_inventory_records(normalized)
+
+
+def _read_json_list(path: Path) -> list[Any]:
+    with path.open("r", encoding="utf-8") as file:
+        data = json.load(file)
+    if not isinstance(data, list):
+        raise ValueError(f"{path.name} content is not a list")
+    return data
+
 
 
 def sort_inventory_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -57,7 +88,8 @@ def _normalize_record(record: dict[str, Any]) -> dict[str, Any] | None:
     else:
         fee = max(0.0, float(fee_input or 0.0))
         fee_source = "手動輸入"
-    tax = round(gross_amount * TAX_RATE, 0) if side == "賣出" else 0.0
+    sell_tax_rate = TAX_RATE if ticker.startswith(("00", "006", "007", "008")) else STOCK_TAX_RATE
+    tax = round(gross_amount * sell_tax_rate, 0) if side == "賣出" else 0.0
     transaction_cost = fee + tax
     net_amount = gross_amount + transaction_cost if side == "買入" else gross_amount - transaction_cost
     return {
@@ -65,6 +97,7 @@ def _normalize_record(record: dict[str, Any]) -> dict[str, Any] | None:
         "name": name,
         "date": str(record.get("date", "")),
         "side": side,
+        "type": side,
         "price": price,
         "lots": lots,
         "odd_shares": odd_shares,
@@ -98,27 +131,78 @@ def load_inventory() -> list[dict[str, Any]]:
     if not INVENTORY_FILE.exists():
         return []
     try:
-        with INVENTORY_FILE.open("r", encoding="utf-8") as file:
-            data = json.load(file)
-        if not isinstance(data, list):
-            save_inventory([])
-            return []
-        normalized = []
-        for record in data:
-            if not isinstance(record, dict):
-                continue
-            normalized_record = _normalize_record(record)
-            if normalized_record is not None:
-                normalized.append(normalized_record)
-        return sort_inventory_records(normalized)
+        return _normalize_inventory_list(_read_json_list(INVENTORY_FILE))
     except (json.JSONDecodeError, OSError, TypeError, ValueError):
-        save_inventory([])
-        return []
+        try:
+            restored = _normalize_inventory_list(_read_json_list(INVENTORY_BACKUP_FILE))
+            shutil.copy2(INVENTORY_BACKUP_FILE, INVENTORY_FILE)
+            STORAGE_WARNINGS.append("inventory.json \u8b80\u53d6\u5931\u6557\uff0c\u5df2\u5f9e inventory_backup.json \u9084\u539f\u3002")
+            return restored
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            STORAGE_WARNINGS.append("inventory.json \u8b80\u53d6\u5931\u6557\uff0c\u4e14 inventory_backup.json \u4e5f\u7121\u6cd5\u9084\u539f\u3002")
+            return []
 
 
 def get_inventory_by_ticker(records: list[dict[str, Any]], ticker: str) -> list[dict[str, Any]]:
     normalized_ticker = str(ticker or "").strip().upper()
     return sort_inventory_records([record for record in records if str(record.get("ticker", "") or "").strip().upper() == normalized_ticker])
+
+
+def summarize_inventory_by_ticker(
+    records: list[dict[str, Any]],
+    current_prices: dict[str, float] | None = None,
+) -> list[dict[str, Any]]:
+    current_prices = {str(key).upper(): float(value or 0.0) for key, value in (current_prices or {}).items()}
+    grouped: dict[str, dict[str, Any]] = {}
+    for record in sort_inventory_records(records):
+        ticker = str(record.get("ticker", "") or "").strip().upper()
+        if not ticker:
+            continue
+        price = float(record.get("price", 0.0) or 0.0)
+        shares = int(record.get("shares", 0) or 0)
+        net_amount = float(record.get("net_amount", 0.0) or 0.0)
+        if price <= 0 or shares <= 0:
+            continue
+        item = grouped.setdefault(
+            ticker,
+            {
+                "ticker": ticker,
+                "name": str(record.get("name", "") or ticker),
+                "total_shares": 0,
+                "total_cost": 0.0,
+                "last_trade_price": 0.0,
+            },
+        )
+        item["name"] = str(record.get("name", "") or item["name"] or ticker)
+        item["last_trade_price"] = price
+        if str(record.get("side", "") or "") == "賣出":
+            item["total_shares"] -= shares
+            item["total_cost"] -= net_amount
+        else:
+            item["total_shares"] += shares
+            item["total_cost"] += net_amount
+
+    summaries: list[dict[str, Any]] = []
+    for ticker, item in grouped.items():
+        total_shares = max(0, int(item["total_shares"]))
+        total_cost = float(item["total_cost"]) if total_shares > 0 else 0.0
+        current_price = current_prices.get(ticker) or float(item.get("last_trade_price", 0.0) or 0.0)
+        market_value = total_shares * current_price
+        unrealized_pnl = market_value - total_cost if total_shares > 0 else 0.0
+        unrealized_pnl_pct = unrealized_pnl / total_cost * 100 if total_cost > 0 else 0.0
+        summaries.append(
+            {
+                "ticker": ticker,
+                "name": item["name"],
+                "total_shares": total_shares,
+                "total_cost": round(total_cost, 0),
+                "current_price": current_price,
+                "market_value": round(market_value, 0),
+                "unrealized_pnl": round(unrealized_pnl, 0),
+                "unrealized_pnl_pct": round(unrealized_pnl_pct, 2),
+            }
+        )
+    return sorted(summaries, key=lambda row: str(row.get("ticker", "")))
 
 
 def calculate_inventory_summary(
@@ -241,15 +325,17 @@ def load_trade_log() -> list[dict[str, Any]]:
     if not TRADE_LOG_FILE.exists():
         return []
     try:
-        with TRADE_LOG_FILE.open("r", encoding="utf-8") as file:
-            data = json.load(file)
-        if not isinstance(data, list):
-            save_trade_log([])
-            return []
+        data = _read_json_list(TRADE_LOG_FILE)
         return [_normalize_trade(record) for record in data if isinstance(record, dict)]
     except (json.JSONDecodeError, OSError, TypeError, ValueError):
-        save_trade_log([])
-        return []
+        try:
+            data = _read_json_list(TRADE_LOG_BACKUP_FILE)
+            shutil.copy2(TRADE_LOG_BACKUP_FILE, TRADE_LOG_FILE)
+            STORAGE_WARNINGS.append("trade_log.json \u8b80\u53d6\u5931\u6557\uff0c\u5df2\u5f9e trade_log_backup.json \u9084\u539f\u3002")
+            return [_normalize_trade(record) for record in data if isinstance(record, dict)]
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            STORAGE_WARNINGS.append("trade_log.json \u8b80\u53d6\u5931\u6557\uff0c\u4e14 trade_log_backup.json \u4e5f\u7121\u6cd5\u9084\u539f\u3002")
+            return []
 
 
 def log_trade(action: str, price: float, shares: int, amount: float) -> dict[str, Any]:

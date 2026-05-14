@@ -115,10 +115,44 @@ def _trader_status(decision) -> tuple[str, str]:
     return "green", "📈 買進"
 
 
-def render_trader_decision_card(decision, portfolio: dict[str, object]) -> None:
+def _fallback_strategy_levels(
+    observation_price: float | None,
+    reasonable_price: float | None,
+    conservative_price: float | None,
+    trade_plan: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    labels = [
+        ("observation", "第一批（觀察）", observation_price),
+        ("fair", "第二批（合理）", reasonable_price),
+        ("conservative", "第三批（保守）", conservative_price),
+    ]
+    levels: list[dict[str, object]] = []
+    for index, (level_type, title, price) in enumerate(labels):
+        plan_row = trade_plan[index] if index < len(trade_plan) else {}
+        budget = float(plan_row.get("batch_budget", plan_row.get("budget", 0.0)) or 0.0)
+        lots = int(plan_row.get("lots", 0) or 0)
+        shares = int(plan_row.get("shares", 0) or 0)
+        amount = float(plan_row.get("amount", 0.0) or 0.0)
+        levels.append(
+            {
+                "type": level_type,
+                "title": title,
+                "price": float(price or plan_row.get("price", 0.0) or 0.0),
+                "budget": budget,
+                "lots": lots,
+                "shares": shares,
+                "amount": amount,
+                "ratio": float(plan_row.get("batch_ratio", 0.0) or 0.0),
+            }
+        )
+    return levels
+
+
+def render_trader_decision_card(decision, portfolio: dict[str, object] | None = None) -> None:
     tone, headline = _trader_status(decision)
-    lots = int(getattr(decision, "suggested_buy_lots", 0) or 0)
-    shares = int(getattr(decision, "suggested_buy_shares", 0) or 0)
+    immediate_plan = getattr(decision, "immediate_plan", "") or "不立即掛單"
+    lots = int(getattr(decision, "immediate_lots", getattr(decision, "suggested_buy_lots", 0)) or 0)
+    shares = int(getattr(decision, "immediate_shares", getattr(decision, "suggested_buy_shares", 0)) or 0)
     today_status = getattr(decision, "today_status", "等待回檔") or "等待回檔"
     next_action = getattr(decision, "next_action", "現在不買，等待合理價。") or "現在不買，等待合理價。"
     observation_price = getattr(decision, "observation_price", None)
@@ -129,23 +163,18 @@ def render_trader_decision_card(decision, portfolio: dict[str, object]) -> None:
     trade_plan = list(getattr(decision, "trade_plan", []) or [])
     trader_plan_v2 = getattr(decision, "trader_plan_v2", {}) or {}
     v2_levels = list(trader_plan_v2.get("levels", []) or []) if isinstance(trader_plan_v2, dict) else []
-    first_batch = trade_plan[0] if trade_plan else {}
-    second_batch = trade_plan[1] if len(trade_plan) > 1 else {}
-    first_lots = int(first_batch.get("lots", 0) or 0)
-    first_shares = int(first_batch.get("shares", 0) or 0)
-    second_lots = int(second_batch.get("lots", 0) or 0)
-    second_shares = int(second_batch.get("shares", 0) or 0)
 
     risk_level = getattr(decision, "risk_bar_label", "") or getattr(decision, "risk_level", "風險未定")
-    suggested_price = reasonable_price or getattr(decision, "suggested_bid", None)
+    immediate_price = getattr(decision, "immediate_price", None)
+    suggested_price = immediate_price if immediate_price is not None else None
 
     st.subheader("🔥 AI即時決策")
     _alert_decision(tone, headline)
 
     status_cols = st.columns(5)
-    status_cols[0].metric("今日建議", headline)
-    status_cols[1].metric("建議張數", f"{lots} 張 {shares} 股")
-    status_cols[2].metric("建議價格", format_price(suggested_price))
+    status_cols[0].metric("今日立即建議", immediate_plan)
+    status_cols[1].metric("立即張數", f"{lots} 張 {shares} 股")
+    status_cols[2].metric("立即價格", format_price(suggested_price) if suggested_price is not None else "不立即掛單")
     status_cols[3].metric("🎯 進場機率", f"{entry_probability}%")
     status_cols[4].metric("⚠️ 風險等級", risk_level)
 
@@ -157,59 +186,67 @@ def render_trader_decision_card(decision, portfolio: dict[str, object]) -> None:
     else:
         st.error(f"🚫 {next_action}")
 
-    st.subheader("三層價格區")
-    if v2_levels:
-        level_labels = {
-            "observation": "觀察 observation",
-            "fair": "合理 fair",
-            "conservative": "保守 conservative",
-        }
-        level_cols = st.columns(3)
-        for col, row in zip(level_cols, v2_levels):
-            level_type = str(row.get("type", ""))
-            with col:
-                st.metric(level_labels.get(level_type, level_type), format_price(float(row.get("price", 0.0) or 0.0)))
-                st.metric("預算", format_price(float(row.get("budget", 0.0) or 0.0)))
-                st.metric("可買", f"{int(row.get('lots', 0) or 0)} 張 {int(row.get('shares', 0) or 0)} 股")
-                st.caption(f"投入比例 {float(row.get('ratio', 0.0) or 0.0) * 100:.0f}%")
-    else:
-        price_cols = st.columns(3)
-        price_cols[0].metric("觀察價", format_price(observation_price))
-        price_cols[1].metric("合理價", format_price(reasonable_price))
-        price_cols[2].metric("保守價", format_price(conservative_price))
+    st.caption("今日建議代表是否現在立即執行；分批策略代表價格到達指定區間時才執行。")
+    st.subheader("📊 分批策略（價格到位才執行）")
+    strategy_levels = v2_levels or _fallback_strategy_levels(observation_price, reasonable_price, conservative_price, trade_plan)
+    titles = {
+        "observation": "第一批（觀察）",
+        "fair": "第二批（合理）",
+        "conservative": "第三批（保守）",
+    }
+    level_cols = st.columns(3)
+    for col, row in zip(level_cols, strategy_levels):
+        level_type = str(row.get("type", ""))
+        with col:
+            st.markdown(f"##### {titles.get(level_type, str(row.get('title', level_type)))}")
+            st.metric("價格", format_price(float(row.get("price", 0.0) or 0.0)))
+            st.metric("預算", format_price(float(row.get("budget", 0.0) or 0.0)))
+            st.metric("張數", f"{int(row.get('lots', 0) or 0)} 張")
+            st.metric("零股", f"{int(row.get('shares', 0) or 0)} 股")
+            st.metric("投入金額", format_price(float(row.get("amount", 0.0) or 0.0)))
 
-        hint_cols = st.columns(2)
-        hint_cols[0].metric("第一批可買", f"{first_lots} 張 {first_shares} 股")
-        hint_cols[1].metric("跌到合理價可買", f"{second_lots} 張 {second_shares} 股")
+    render_buy_impact(decision)
 
+
+def render_buy_impact(decision) -> None:
+    st.subheader("買完後影響")
+    trade_plan = list(getattr(decision, "trade_plan", []) or [])
     if trade_plan:
-        for row in trade_plan:
-            with st.container():
-                batch_ratio = float(row.get("batch_ratio", 0.0) or 0.0)
-                st.markdown(f"##### {row.get('batch_title', row.get('level_name', ''))}")
-                st.caption(f"投入 {batch_ratio * 100:.0f}% 預算")
-                plan_cols = st.columns(4)
-                plan_cols[0].metric("價格", format_price(float(row.get("price", 0.0) or 0.0)))
-                plan_cols[1].metric("預算", f"{format_price(float(row.get('batch_budget', 0.0) or 0.0))}（{batch_ratio * 100:.0f}%）")
-                plan_cols[2].metric("可買", f"{int(row.get('lots', 0) or 0)} 張 {int(row.get('shares', 0) or 0)} 股")
-                plan_cols[3].metric("投入", format_price(float(row.get("amount", 0.0) or 0.0)))
-                result_cols = st.columns(3)
-                result_cols[0].metric("成交後平均成本", format_price(float(row.get("after_batch_average_cost", 0.0) or 0.0)))
-                result_cols[1].metric("成交後股票比例", format_ratio(float(row.get("after_batch_stock_ratio", 0.0) or 0.0)))
-                result_cols[2].metric("成交後剩餘現金", format_price(float(row.get("after_batch_cash", 0.0) or 0.0)))
-                if row.get("over_limit_after_batch"):
-                    st.warning("此批會超過部位上限")
-                st.caption(str(row.get("action_text", "")))
         last_row = trade_plan[-1]
-        st.markdown("#### 若三批都成交")
-        total_cols = st.columns(5)
-        total_cols[0].metric("合計投入", format_price(float(last_row.get("cumulative_amount", 0.0) or 0.0)))
-        total_cols[1].metric("合計買入", f"{int(last_row.get('cumulative_lots', 0) or 0)} 張 {int(last_row.get('cumulative_shares', 0) or 0)} 股")
-        total_cols[2].metric("最終平均成本", format_price(float(last_row.get("after_batch_average_cost", 0.0) or 0.0)))
-        total_cols[3].metric("最終股票比例", format_ratio(float(last_row.get("after_batch_stock_ratio", 0.0) or 0.0)))
-        total_cols[4].metric("剩餘現金", format_price(float(last_row.get("after_batch_cash", 0.0) or 0.0)))
+        total_amount = float(last_row.get("cumulative_amount", 0.0) or 0.0)
+        total_lots = int(last_row.get("cumulative_lots", 0) or 0)
+        total_shares = int(last_row.get("cumulative_shares", 0) or 0)
+        average_cost = float(last_row.get("after_batch_average_cost", 0.0) or 0.0)
+        remaining_cash = float(last_row.get("after_batch_cash", 0.0) or 0.0)
+        stock_ratio = float(last_row.get("after_batch_stock_ratio", 0.0) or 0.0)
+        over_limit = bool(last_row.get("over_limit_after_batch", False))
     else:
-        st.warning("目前無法產生分批買進策略。")
+        total_amount = 0.0
+        total_lots = 0
+        total_shares = 0
+        average_cost = getattr(decision, "after_buy_average_cost", None) or 0.0
+        remaining_cash = getattr(decision, "after_buy_remaining_cash", None) or 0.0
+        stock_ratio = getattr(decision, "after_buy_stock_ratio", None) or 0.0
+        over_limit = bool(getattr(decision, "over_position_limit_after_buy", False))
+
+    cols = st.columns(3)
+    cols[0].metric("合計投入", format_price(total_amount))
+    cols[1].metric("合計買入", f"{total_lots} 張 {total_shares} 股")
+    cols[2].metric("是否超過上限", "是" if over_limit else "否")
+    cols = st.columns(3)
+    cols[0].metric("最終平均成本", format_price(float(average_cost or 0.0)))
+    cols[1].metric("最終剩餘現金", format_price(float(remaining_cash or 0.0)))
+    cols[2].metric("最終股票比例", format_ratio(float(stock_ratio or 0.0)))
+
+
+def render_system_check_panel(flags: list[str]) -> None:
+    st.subheader("系統自我檢查")
+    if not flags:
+        st.success("✅ 系統檢查通過")
+        return
+    st.warning(f"⚠️ 發現 {len(flags)} 項衝突")
+    for flag in flags:
+        st.write(f"- {flag}")
 
 def render_today_action(decision) -> None:
     next_action = getattr(decision, "next_action", "先觀察，不追價。") or "先觀察，不追價。"
@@ -504,7 +541,7 @@ def render_final_action_card(decision, portfolio: dict[str, object]) -> None:
 
 
 def render_self_check(decision) -> None:
-    st.subheader("系統自我檢查")
+    st.subheader("AI模型一致性檢查")
     flags = list(getattr(decision, "conflict_flags", []) or [])
     if not flags:
         st.success("✅ 通過，未發現衝突")
