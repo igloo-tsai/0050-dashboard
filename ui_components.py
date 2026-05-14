@@ -239,14 +239,26 @@ def render_buy_impact(decision) -> None:
     cols[2].metric("最終股票比例", format_ratio(float(stock_ratio or 0.0)))
 
 
-def render_system_check_panel(flags: list[str]) -> None:
-    st.subheader("系統自我檢查")
-    if not flags:
-        st.success("✅ 系統檢查通過")
-        return
-    st.warning(f"⚠️ 發現 {len(flags)} 項衝突")
-    for flag in flags:
-        st.write(f"- {flag}")
+def render_system_validation(validation_result: dict[str, object]) -> None:
+    st.subheader("???????")
+    errors = list(validation_result.get("errors", []) or [])
+    warnings = list(validation_result.get("warnings", []) or [])
+    fixed = list(validation_result.get("fixed", []) or [])
+    if not errors and not warnings:
+        st.success("? ??????")
+    elif errors:
+        st.error(f"? ?? {len(errors)} ???")
+    else:
+        st.warning(f"?? ?? {len(warnings)} ???")
+
+    for error in errors:
+        st.write(f"- {error}")
+    for warning in warnings:
+        st.write(f"- {warning}")
+    if fixed:
+        st.info("??????")
+        for item in fixed:
+            st.write(f"- {item}")
 
 def render_today_action(decision) -> None:
     next_action = getattr(decision, "next_action", "先觀察，不追價。") or "先觀察，不追價。"

@@ -36,7 +36,7 @@ from ui_components import (
     render_risk_detail,
     render_score_cards,
     render_self_check,
-    render_system_check_panel,
+    render_system_validation,
     render_trader_decision_card,
     render_trade_record_summary,
     render_trade_log_performance,
@@ -44,6 +44,7 @@ from ui_components import (
     render_transaction_performance,
     render_volume_card,
 )
+from validator import run_system_validation
 from volume_analysis import analyze_volume
 
 
@@ -675,65 +676,6 @@ def render_inventory_summary(summary: dict[str, object]) -> None:
         st.warning("同一標的庫存出現負股數，請檢查賣出紀錄。")
 
 
-def validate_system_state(
-    decision,
-    portfolio: dict[str, object],
-    summary: dict[str, object],
-    ticker_records: list[dict[str, object]],
-    current_ticker: str,
-    current_price: float,
-    inputs: dict[str, object],
-) -> list[str]:
-    flags: list[str] = []
-    suggested_lots = int(getattr(decision, "suggested_buy_lots", 0) or 0)
-    suggested_shares = int(getattr(decision, "suggested_buy_shares", 0) or 0)
-    suggested_price = float(
-        getattr(decision, "immediate_price", None)
-        or getattr(decision, "reasonable_price", getattr(decision, "suggested_bid", current_price))
-        or current_price
-        or 0.0
-    )
-    suggested_amount = suggested_lots * suggested_price * 1000 + suggested_shares * suggested_price
-    available_budget = float(getattr(decision, "available_budget", 0.0) or 0.0)
-    today_budget = float(inputs.get("today_budget", 0.0) or 0.0)
-    cash = float(inputs.get("cash", 0.0) or 0.0)
-    max_ratio = float(inputs.get("max_ratio", 0.0) or 0.0)
-
-    if bool(portfolio.get("over_target_ratio", False)) and (suggested_lots > 0 or suggested_shares > 0):
-        flags.append("部位超標時仍產生買入建議")
-    if suggested_amount > today_budget + 1:
-        flags.append("建議投入超過今日預算")
-    if suggested_amount > cash + 1:
-        flags.append("建議投入超過可用現金")
-    if suggested_shares >= 1000:
-        flags.append("零股數量超過 999，應自動轉為張數")
-    observation = float(getattr(decision, "observation_price", 0.0) or 0.0)
-    reasonable = float(getattr(decision, "reasonable_price", 0.0) or 0.0)
-    conservative = float(getattr(decision, "conservative_price", 0.0) or 0.0)
-    if not (current_price >= observation >= reasonable >= conservative):
-        flags.append("價格層級不符合 current >= observation >= reasonable >= conservative")
-
-    summary_avg = float(summary.get("average_cost", 0.0) or 0.0)
-    portfolio_avg = float(portfolio.get("average_cost", 0.0) or 0.0)
-    if abs(summary_avg - portfolio_avg) > 0.01:
-        flags.append("庫存平均成本與 AI 使用平均成本不一致")
-    if bool(summary.get("negative_position", False)):
-        flags.append("此標的賣出股數大於買入股數，請檢查庫存")
-    if any(float(record.get("price", 0.0) or 0.0) <= 0 for record in ticker_records):
-        flags.append("存在 price <= 0 的庫存紀錄，應自動忽略")
-    if any(str(record.get("ticker", "") or "").upper() != current_ticker.upper() for record in ticker_records):
-        flags.append("目前標的混入其他 ticker 庫存")
-
-    total_trade_amount = sum(float(row.get("amount", 0.0) or 0.0) for row in list(getattr(decision, "trade_plan", []) or []))
-    if total_trade_amount > available_budget + 1:
-        flags.append("分批總投入超過 available_budget")
-    if not list(getattr(decision, "trade_plan", []) or []) and not (getattr(decision, "observation_price", None) and getattr(decision, "reasonable_price", None) and getattr(decision, "conservative_price", None)):
-        flags.append("trade_plan 為空且缺少 fallback 三層價格")
-    if max_ratio > 0 and float(summary.get("current_stock_ratio", 0.0) or 0.0) > max_ratio and (suggested_lots > 0 or suggested_shares > 0):
-        flags.append("買入建議會使部位上限風控失效")
-    return list(dict.fromkeys(flags))
-
-
 def render_target_page(label: str, ticker: str, prefix: str, start: date, end: date) -> None:
     with st.spinner("正在取得行情與計算 AI 決策..."):
         resolved_ticker, data = fetch_taiwan_stock(ticker, start, end)
@@ -795,11 +737,23 @@ def render_target_page(label: str, ticker: str, prefix: str, start: date, end: d
         ticker=resolved_ticker,
         latest_close=latest_close,
     )
-    system_flags = validate_system_state(decision, portfolio, summary, ticker_records, resolved_ticker, current_price, inputs)
+    validation_result = run_system_validation(
+        records=ticker_records,
+        ticker=resolved_ticker,
+        portfolio={**portfolio, "total_shares": summary.get("total_shares", portfolio.get("shares", 0))},
+        decision=decision,
+        trade_plan=decision.trade_plan,
+        available_budget=float(getattr(decision, "available_budget", 0.0) or 0.0),
+        today_budget=float(inputs["today_budget"] or 0.0),
+        cash=float(inputs["cash"] or 0.0),
+        max_stock_ratio=float(inputs["max_ratio"] or 0.0),
+        current_price=current_price,
+    )
+    system_flags = list(validation_result.get("conflict_flags", []) or [])
 
     render_trader_decision_card(decision)
+    render_system_validation(validation_result)
     render_inventory_summary(summary)
-    render_system_check_panel(system_flags)
     render_target_inputs(prefix, latest_close)
     ticker_records = render_target_inventory_manager(resolved_ticker, label, prefix, current_price)
 
