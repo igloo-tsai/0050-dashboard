@@ -5,6 +5,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 
 INVENTORY_FILE = Path(__file__).with_name("inventory.json")
 INVENTORY_BACKUP_FILE = Path(__file__).with_name("inventory_backup.json")
@@ -12,6 +14,19 @@ TRADE_LOG_FILE = Path(__file__).with_name("trade_log.json")
 TRADE_LOG_BACKUP_FILE = Path(__file__).with_name("trade_log_backup.json")
 FEE_RATE = 0.001425
 TAX_RATE = 0.001
+
+
+def sort_inventory_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, pd.Timestamp, int, int]:
+        original_index, record = item
+        parsed_date = pd.to_datetime(record.get("date", ""), errors="coerce")
+        invalid_date = 1 if pd.isna(parsed_date) else 0
+        safe_date = pd.Timestamp.max if invalid_date else parsed_date
+        action = str(record.get("side", record.get("type", "")) or "")
+        action_order = 0 if action == "買入" else 1 if action == "賣出" else 2
+        return invalid_date, safe_date, action_order, original_index
+
+    return [record for _, record in sorted(enumerate(records), key=sort_key)]
 
 
 def _normalize_record(record: dict[str, Any]) -> dict[str, Any] | None:
@@ -72,6 +87,7 @@ def save_inventory(records: list[dict[str, Any]]) -> None:
         normalized_record = _normalize_record(record)
         if normalized_record is not None:
             normalized.append(normalized_record)
+    normalized = sort_inventory_records(normalized)
     if INVENTORY_FILE.exists():
         shutil.copy2(INVENTORY_FILE, INVENTORY_BACKUP_FILE)
     with INVENTORY_FILE.open("w", encoding="utf-8") as file:
@@ -94,7 +110,7 @@ def load_inventory() -> list[dict[str, Any]]:
             normalized_record = _normalize_record(record)
             if normalized_record is not None:
                 normalized.append(normalized_record)
-        return normalized
+        return sort_inventory_records(normalized)
     except (json.JSONDecodeError, OSError, TypeError, ValueError):
         save_inventory([])
         return []
@@ -102,7 +118,7 @@ def load_inventory() -> list[dict[str, Any]]:
 
 def get_inventory_by_ticker(records: list[dict[str, Any]], ticker: str) -> list[dict[str, Any]]:
     normalized_ticker = str(ticker or "").strip().upper()
-    return [record for record in records if str(record.get("ticker", "") or "").strip().upper() == normalized_ticker]
+    return sort_inventory_records([record for record in records if str(record.get("ticker", "") or "").strip().upper() == normalized_ticker])
 
 
 def calculate_inventory_summary(
@@ -111,7 +127,7 @@ def calculate_inventory_summary(
     cash: float,
     max_stock_ratio: float,
 ) -> dict[str, Any]:
-    valid_records = [record for record in records if float(record.get("price", 0.0) or 0.0) > 0]
+    valid_records = sort_inventory_records([record for record in records if float(record.get("price", 0.0) or 0.0) > 0])
     ticker = str(valid_records[0].get("ticker", "") or "") if valid_records else ""
     total_shares = 0
     total_cost = 0.0

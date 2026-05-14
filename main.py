@@ -620,14 +620,14 @@ def render_price_selector(prefix: str, latest_close: float) -> dict[str, float |
 
 
 def render_target_inputs(prefix: str) -> dict[str, float | None]:
-    st.subheader("投資參數")
-    cols = st.columns(2)
-    with cols[0]:
-        cash = st.number_input("可投入現金", min_value=0.0, value=100_000.0, step=10_000.0, key=f"{prefix}_target_cash")
-    with cols[1]:
-        manual_volume = st.number_input("今日成交量，可選填", min_value=0.0, value=0.0, step=1000.0, key=f"{prefix}_target_manual_volume")
-        today_budget = st.number_input("今日預算投資金額", min_value=0.0, value=100_000.0, step=10_000.0, key=f"{prefix}_target_today_budget")
-        max_ratio = st.slider("這檔最多佔整體資金比例", min_value=0, max_value=100, value=70, step=5, key=f"{prefix}_target_max_ratio")
+    with st.expander("投資參數", expanded=False):
+        cols = st.columns(2)
+        with cols[0]:
+            cash = st.number_input("可投入現金", min_value=0.0, value=100_000.0, step=10_000.0, key=f"{prefix}_target_cash")
+        with cols[1]:
+            manual_volume = st.number_input("今日成交量，可選填", min_value=0.0, value=0.0, step=1000.0, key=f"{prefix}_target_manual_volume")
+            today_budget = st.number_input("今日預算投資金額", min_value=0.0, value=100_000.0, step=10_000.0, key=f"{prefix}_target_today_budget")
+            max_ratio = st.slider("這檔最多佔整體資金比例", min_value=0, max_value=100, value=70, step=5, key=f"{prefix}_target_max_ratio")
     return {
         "cash": cash,
         "manual_volume": manual_volume if manual_volume > 0 else None,
@@ -679,12 +679,12 @@ def render_target_page(label: str, ticker: str, prefix: str, start: date, end: d
     if latest_close > 0 and abs(current_price - latest_close) / latest_close >= 0.10:
         st.warning("手動價格與最新收盤價差異較大，請確認是否為即時盤中價格。")
 
-    ticker_records = render_target_inventory_manager(resolved_ticker, label, prefix, current_price)
     inputs = render_target_inputs(prefix)
+    ticker_records = render_target_inventory_manager(resolved_ticker, label, prefix, current_price)
     summary = build_inventory_summary(ticker_records, current_price, float(inputs["cash"] or 0.0), float(inputs["max_ratio"] or 0.0))
-    render_inventory_summary(summary)
 
     if data.empty:
+        render_inventory_summary(summary)
         return
     analysis_data = apply_intraday_price(data, current_price)
     tech = build_technical_snapshot(analysis_data)
@@ -721,6 +721,7 @@ def render_target_page(label: str, ticker: str, prefix: str, start: date, end: d
     )
 
     render_trader_decision_card(decision, portfolio)
+    render_inventory_summary(summary)
     render_trade_log_section(prefix, decision, portfolio, current_price)
     render_key_reasons(decision)
 

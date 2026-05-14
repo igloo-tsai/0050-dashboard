@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from storage import sort_inventory_records
 from technical_analysis import moving_average
 
 
@@ -43,6 +44,7 @@ def inject_mobile_css() -> None:
         .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
         h1 { line-height: 1.15 !important; }
         h2, h3 { line-height: 1.25 !important; }
+        h2:has(span), h3:has(span) { font-weight: 900 !important; }
         [data-testid="stMetric"] {
             border: 1px solid rgba(255,255,255,.16);
             border-radius: 12px;
@@ -66,8 +68,9 @@ def inject_mobile_css() -> None:
             h1 { font-size: 1.45rem !important; }
             h2 { font-size: 1.2rem !important; }
             h3 { font-size: 1.08rem !important; }
-            [data-testid="stMetric"] { padding: .7rem .75rem; }
-            [data-testid="stMetric"] [data-testid="stMetricValue"] { font-size: 1.05rem !important; }
+            [data-testid="stMetric"] { padding: 1rem .9rem; min-height: 92px; }
+            [data-testid="stMetric"] [data-testid="stMetricValue"] { font-size: 1.18rem !important; }
+            div[data-testid="stAlert"] { padding: 1.05rem !important; font-size: 1.05rem !important; }
         }
         </style>
         """,
@@ -106,10 +109,10 @@ def _alert_decision(tone: str, line: str) -> None:
 def _trader_status(decision) -> tuple[str, str]:
     today_status = getattr(decision, "today_status", "") or ""
     if today_status == "禁止加碼":
-        return "red", "🔴 暫緩進場（高風險）"
+        return "red", "🚫 暫緩"
     if today_status == "等待回檔":
-        return "yellow", "🟡 等待回檔（觀察）"
-    return "green", "🟢 可進場（低風險）"
+        return "yellow", "⏳ 觀察"
+    return "green", "📈 買進"
 
 
 def render_trader_decision_card(decision, portfolio: dict[str, object]) -> None:
@@ -131,33 +134,36 @@ def render_trader_decision_card(decision, portfolio: dict[str, object]) -> None:
     second_lots = int(second_batch.get("lots", 0) or 0)
     second_shares = int(second_batch.get("shares", 0) or 0)
 
-    st.subheader("交易員模式")
+    risk_level = getattr(decision, "risk_bar_label", "") or getattr(decision, "risk_level", "風險未定")
+    suggested_price = reasonable_price or getattr(decision, "suggested_bid", None)
+
+    st.subheader("🔥 AI即時決策")
     _alert_decision(tone, headline)
 
-    st.markdown("#### 今日狀態")
-    status_cols = st.columns(4)
-    status_cols[0].metric("狀態", today_status)
-    status_cols[1].metric("交易模式", position_mode_label)
-    status_cols[2].metric("整股", f"{lots} 張")
-    status_cols[3].metric("零股", f"{shares} 股")
+    status_cols = st.columns(5)
+    status_cols[0].metric("今日建議", headline)
+    status_cols[1].metric("建議張數", f"{lots} 張 {shares} 股")
+    status_cols[2].metric("建議價格", format_price(suggested_price))
+    status_cols[3].metric("🎯 進場機率", f"{entry_probability}%")
+    status_cols[4].metric("⚠️ 風險等級", risk_level)
 
-    hint_cols = st.columns(2)
-    hint_cols[0].metric("第一批可買", f"{first_lots} 張 {first_shares} 股")
-    hint_cols[1].metric("跌到合理價可買", f"{second_lots} 張 {second_shares} 股")
-
-    st.markdown("#### 今日動作")
+    st.subheader("今日操作")
     if tone == "green":
-        st.success(next_action)
+        st.success(f"📈 {next_action}")
     elif tone == "yellow":
-        st.warning(next_action)
+        st.warning(f"⏳ {next_action}")
     else:
-        st.error(next_action)
+        st.error(f"🚫 {next_action}")
 
-    st.markdown("#### 分批買進策略")
+    st.subheader("三層價格區")
     price_cols = st.columns(3)
     price_cols[0].metric("觀察價", format_price(observation_price))
     price_cols[1].metric("合理價", format_price(reasonable_price))
     price_cols[2].metric("保守價", format_price(conservative_price))
+
+    hint_cols = st.columns(2)
+    hint_cols[0].metric("第一批可買", f"{first_lots} 張 {first_shares} 股")
+    hint_cols[1].metric("跌到合理價可買", f"{second_lots} 張 {second_shares} 股")
 
     if trade_plan:
         for row in trade_plan:
@@ -187,10 +193,6 @@ def render_trader_decision_card(decision, portfolio: dict[str, object]) -> None:
         total_cols[4].metric("剩餘現金", format_price(float(last_row.get("after_batch_cash", 0.0) or 0.0)))
     else:
         st.warning("目前無法產生分批買進策略。")
-
-    st.markdown("#### 機率")
-    st.metric("進場機率", f"{entry_probability}%")
-
 
 def render_today_action(decision) -> None:
     next_action = getattr(decision, "next_action", "先觀察，不追價。") or "先觀察，不追價。"
@@ -232,7 +234,9 @@ def _inventory_consistency_warnings(records: list[dict[str, object]]) -> list[st
 
 
 def render_inventory_records(records: list[dict[str, object]], current_price: float | None = None) -> None:
+    records = sort_inventory_records(list(records))
     st.caption(f"目前已載入 {len(records)} 筆庫存")
+    st.caption("已依日期由舊到新排序")
     if not records:
         st.info("尚未建立逐筆庫存。")
         return

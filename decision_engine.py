@@ -431,6 +431,8 @@ def make_decision(
     today_budget = float(today_budget if today_budget is not None else portfolio.get("max_single_investment", cash))
     position_room = max_allow_invest
     available_budget = max(0.0, min(today_budget, cash, position_room))
+    if portfolio.get("near_target_ratio") and current_price > 0:
+        available_budget = min(available_budget, current_price * 1000 * 1.001425)
     profit_ratio = (current_price - average_cost) / average_cost if holding_lots > 0 and average_cost > 0 else 0.0
     cost_price_zone, cost_zone_lot_cap, cost_zone_reason = classify_cost_price_zone(current_price, average_cost)
     close_drop_pct = 0.0
@@ -568,6 +570,8 @@ def make_decision(
 
     if max_buy_lots <= 0 and suggested_buy_lots <= 0 and not over_position_limit:
         primary_reasons.append("可用現金、今日預算或持倉上限不足以支撐整股加碼。")
+    if portfolio.get("near_target_ratio") and not over_position_limit:
+        primary_reasons.append("目前已接近部位上限，系統已自動降低建議張數。")
 
     if rsi is not None and rsi > 75 and drawdown > -5 and suggested_buy_lots > 0:
         suggested_buy_lots = min(suggested_buy_lots, 1)
