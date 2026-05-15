@@ -288,7 +288,7 @@ def render_system_validation(validation_result: dict[str, object]) -> None:
 
 def render_valuation_quality_card(result: dict[str, object] | None) -> None:
     st.subheader("估值與標的品質")
-    if not result:
+    if not result or not isinstance(result, dict):
         st.info("估值與標的品質資料不足，暫以中性分數處理。")
         return
 

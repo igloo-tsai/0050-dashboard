@@ -56,6 +56,23 @@ from valuation_quality_engine import evaluate_valuation_quality
 from volume_analysis import analyze_volume
 
 
+def fallback_valuation_quality_result() -> dict[str, object]:
+    return {
+        "mode": "UNKNOWN",
+        "valuation_score": 50,
+        "quality_score": 50,
+        "final_score": 50,
+        "valuation_label": "資料不足",
+        "quality_label": "資料不足",
+        "investability_label": "資料不足，僅供參考",
+        "reasons": ["估值與標的品質模組尚未取得有效資料"],
+        "warnings": ["valuation_quality_result fallback used"],
+        "missing_fields": [],
+        "data_quality_score": 0,
+        "is_data_sufficient": False,
+    }
+
+
 def display_name(label: str, ticker: str) -> str:
     if label and not label.isdigit():
         return f"{label}（{ticker}）"
@@ -400,7 +417,11 @@ def run_analysis_page(label: str, ticker: str, prefix: str, start: date, end: da
 
     volume = analyze_volume(analysis_data, inputs["manual_volume"])
     market = get_market_background(start, end)
-    valuation_quality_result = evaluate_valuation_quality(resolved_ticker, analysis_data, market)
+    valuation_quality_result = fallback_valuation_quality_result()
+    try:
+        valuation_quality_result = evaluate_valuation_quality(resolved_ticker, analysis_data, market) or valuation_quality_result
+    except Exception as exc:
+        valuation_quality_result["warnings"] = list(valuation_quality_result.get("warnings", [])) + [f"估值與標的品質模組錯誤：{exc}"]
     portfolio = calculate_portfolio(
         holding_lots=float(inputs["holding_lots"] or 0),
         average_cost=float(inputs["average_cost"] or 0),
@@ -422,6 +443,7 @@ def run_analysis_page(label: str, ticker: str, prefix: str, start: date, end: da
         latest_close=latest_close,
         valuation_quality_result=valuation_quality_result,
     )
+    valuation_quality_result = getattr(decision, "valuation_quality_result", valuation_quality_result) or fallback_valuation_quality_result()
 
     st.caption(f"分析標的：{display_name(label, resolved_ticker)}｜最新收盤價：{format_price(latest_close)}｜盤中價格：{format_price(current_price)}")
     price_cols = st.columns(2)
@@ -734,6 +756,11 @@ def render_target_page(label: str, ticker: str, prefix: str, start: date, end: d
 
     volume = analyze_volume(analysis_data, inputs["manual_volume"])
     market = get_market_background(start, end)
+    valuation_quality_result = fallback_valuation_quality_result()
+    try:
+        valuation_quality_result = evaluate_valuation_quality(resolved_ticker, analysis_data, market) or valuation_quality_result
+    except Exception as exc:
+        valuation_quality_result["warnings"] = list(valuation_quality_result.get("warnings", [])) + [f"估值與標的品質模組錯誤：{exc}"]
     portfolio = calculate_portfolio(
         holding_lots=float(summary.get("holding_lots", 0.0) or 0.0),
         average_cost=float(summary.get("average_cost", 0.0) or 0.0),
@@ -761,6 +788,7 @@ def render_target_page(label: str, ticker: str, prefix: str, start: date, end: d
         latest_close=latest_close,
         valuation_quality_result=valuation_quality_result,
     )
+    valuation_quality_result = getattr(decision, "valuation_quality_result", valuation_quality_result) or fallback_valuation_quality_result()
     validation_result = run_system_validation(
         records=ticker_records,
         ticker=resolved_ticker,
