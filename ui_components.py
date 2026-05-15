@@ -40,6 +40,16 @@ def render_stock_candidate_selector(candidates: pd.DataFrame, key: str) -> dict[
         st.warning("找不到股票，請改用股票代碼、中文名稱或部分關鍵字搜尋。")
         return None
 
+    if len(candidates) == 1:
+        row = candidates.iloc[0]
+        selected = {
+            "ticker_code": str(row.get("ticker_code", "") or ""),
+            "stock_name": str(row.get("stock_name", "") or ""),
+            "market": str(row.get("market", "") or ""),
+        }
+        st.success(f"已自動選定：{selected['ticker_code']}｜{selected['stock_name']}｜{selected['market']}")
+        return selected
+
     options = ["請選擇股票"]
     rows: dict[str, dict[str, str]] = {}
     for _, row in candidates.iterrows():

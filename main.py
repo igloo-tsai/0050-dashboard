@@ -718,7 +718,7 @@ def render_inventory_summary(summary: dict[str, object]) -> None:
         st.warning("同一標的庫存出現負股數，請檢查賣出紀錄。")
 
 
-def render_target_page(label: str, ticker: str, prefix: str, start: date, end: date) -> None:
+def render_target_page(label: str, ticker: str, prefix: str, start: date, end: date, data_context: dict[str, object] | None = None) -> None:
     with st.spinner("正在取得行情與計算 AI 決策..."):
         resolved_ticker, data = fetch_taiwan_stock(ticker, start, end)
 
@@ -731,6 +731,21 @@ def render_target_page(label: str, ticker: str, prefix: str, start: date, end: d
     st.subheader(display_name(label, resolved_ticker))
     inputs = get_target_params(prefix, latest_close)
     current_price = float(inputs["current_price"] or latest_close or 0.0)
+    data_context = dict(data_context or {})
+    source_label_map = {
+        "api": "API",
+        "cache": "cache",
+        "cache_fallback": "cache",
+        "builtin_fallback": "fallback",
+        "manual": "manual",
+    }
+    data_source = source_label_map.get(str(data_context.get("source", "API")), str(data_context.get("source", "API")))
+    data_quality = int(data_context.get("data_quality", 80 if data_source == "API" else 70 if data_source == "cache" else 45) or 0)
+    updated_at = str(data_context.get("updated_at", date.today().isoformat()) or date.today().isoformat())
+    transparency_cols = st.columns(3)
+    transparency_cols[0].metric("資料來源", data_source)
+    transparency_cols[1].metric("資料可信度", f"{data_quality}/100")
+    transparency_cols[2].metric("更新時間", updated_at)
     st.caption(f"決策價格：{format_price(current_price)}｜價格來源：{inputs.get('price_label', '最新收盤價')}")
     for warning in list(inputs.get("price_warnings", []) or []):
         st.warning(str(warning))
@@ -811,6 +826,11 @@ def render_target_page(label: str, ticker: str, prefix: str, start: date, end: d
     system_flags = list(validation_result.get("conflict_flags", []) or [])
 
     render_trader_decision_card(decision)
+    quick_cols = st.columns(4)
+    quick_cols[0].metric("今日建議", str(getattr(decision, "action_label", "觀察") or "觀察"))
+    quick_cols[1].metric("建議張數", f"{int(getattr(decision, 'immediate_lots', 0) or 0)} 張 {int(getattr(decision, 'immediate_shares', 0) or 0)} 股")
+    quick_cols[2].metric("進場機率", f"{int(getattr(decision, 'entry_probability', 0) or 0)}%")
+    quick_cols[3].metric("風險等級", str(getattr(decision, "risk_bar_label", "-") or "-"))
     render_system_validation(validation_result)
     render_valuation_quality_card(valuation_quality_result)
     render_broker_grade_profit_section(summary)
@@ -1062,13 +1082,17 @@ def main() -> None:
 
     with tab_0050:
         st.subheader("0050 專頁")
-        render_target_page("元大台灣50", "0050.TW", "etf0050", start, end)
+        render_target_page("元大台灣50", "0050.TW", "etf0050", start, end, {"source": "API", "data_quality": 80, "updated_at": end.isoformat()})
 
     with tab_stock:
         st.subheader("台股AI分析")
         master_result = load_stock_master()
         for warning in master_result.warnings:
             st.warning(warning)
+        if master_result.debug_errors:
+            with st.expander("股票清單 debug 資訊", expanded=False):
+                for detail in master_result.debug_errors:
+                    st.write(f"- {detail}")
         if master_result.errors or master_result.data.empty:
             st.error("目前無法取得股票清單")
             for error in master_result.errors:
@@ -1091,7 +1115,19 @@ def main() -> None:
                     market = selected_stock["market"]
                     st.caption(f"已選定：{ticker}｜{label}｜{market}")
                     stock_prefix = f"stock_ai_{ticker.replace('.', '_')}"
-                    render_target_page(label, ticker, stock_prefix, start, end)
+                    source_quality = {"api": 85, "cache": 75, "cache_fallback": 65, "builtin_fallback": 45}
+                    render_target_page(
+                        label,
+                        ticker,
+                        stock_prefix,
+                        start,
+                        end,
+                        {
+                            "source": master_result.source,
+                            "data_quality": source_quality.get(master_result.source, 50),
+                            "updated_at": end.isoformat(),
+                        },
+                    )
 
     with tab_inventory:
         render_all_inventory_page(start, end)
